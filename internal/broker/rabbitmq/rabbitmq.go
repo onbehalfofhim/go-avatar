@@ -54,7 +54,7 @@ func NewClient(ctx context.Context, url string) (*Client, error) {
 		channel:    channel,
 	}
 
-	if err := client.declareTopology(ctx); err != nil {
+	if err := client.declareTopology(); err != nil {
 		_ = client.Close()
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func NewClient(ctx context.Context, url string) (*Client, error) {
 	return client, nil
 }
 
-func (c *Client) declareTopology(ctx context.Context) error {
+func (c *Client) declareTopology() error {
 	if err := c.channel.ExchangeDeclare(
 		ExchangeName,
 		"direct",

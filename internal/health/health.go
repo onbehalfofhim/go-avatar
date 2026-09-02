@@ -43,8 +43,6 @@ func (c *Checker) Check(ctx context.Context) Result {
 	)
 
 	for _, check := range c.checks {
-		check := check
-
 		wg.Add(1)
 
 		go func() {
