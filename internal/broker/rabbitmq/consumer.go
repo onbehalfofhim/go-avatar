@@ -19,10 +19,23 @@ type Consumer struct {
 	channel *amqp.Channel
 }
 
-func NewConsumer(client *Client) *Consumer {
-	return &Consumer{
-		channel: client.channel,
+func NewConsumer(client *Client) (*Consumer, error) {
+	channel, err := client.connection.Channel()
+	if err != nil {
+		return nil, fmt.Errorf("open consumer channel: %w", err)
 	}
+
+	return &Consumer{
+		channel: channel,
+	}, nil
+}
+
+func (c *Consumer) Close() error {
+	if err := c.channel.Close(); err != nil {
+		return fmt.Errorf("close consumer channel: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Consumer) Consume(
@@ -51,7 +64,6 @@ func (c *Consumer) Consume(
 
 	go func() {
 		defer close(messages)
-
 		for {
 			select {
 			case <-ctx.Done():

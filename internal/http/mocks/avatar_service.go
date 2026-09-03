@@ -10,7 +10,7 @@ import (
 	service "go-avatar-service/internal/service"
 	reflect "reflect"
 
-	gomock "github.com/golang/mock/gomock"
+	gomock "go.uber.org/mock/gomock"
 )
 
 // MockAvatarService is a mock of AvatarService interface.

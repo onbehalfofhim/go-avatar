@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -140,8 +140,13 @@ func (h *AvatarHandler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, image.MaxFileSize+1)
-
 	if err := r.ParseMultipartForm(image.MaxFileSize + 1); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, err)
+			return
+		}
+
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -156,18 +161,24 @@ func (h *AvatarHandler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			log.Printf("close uploaded file: %v", err)
+			slog.Error("close uploaded file", "error", err)
 		}
 	}()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, err)
+			return
+		}
+
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
 	if int64(len(content)) > image.MaxFileSize {
-		writeError(w, http.StatusBadRequest, image.ErrFileTooLarge)
+		writeError(w, http.StatusRequestEntityTooLarge, image.ErrFileTooLarge)
 		return
 	}
 
@@ -208,7 +219,7 @@ func (h *AvatarHandler) getByID(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			log.Printf("close response body: %v", err)
+			slog.Error("close response body", "error", err)
 		}
 	}()
 
@@ -280,7 +291,7 @@ func (h *AvatarHandler) getCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			log.Printf("close response body: %v", err)
+			slog.Error("close response body", "error", err)
 		}
 	}()
 
@@ -396,6 +407,9 @@ func writeServiceError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, service.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
+
+	case errors.Is(err, service.ErrForbidden):
+		writeError(w, http.StatusForbidden, err)
 
 	default:
 		writeError(

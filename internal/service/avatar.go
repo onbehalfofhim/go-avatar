@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -25,10 +26,30 @@ type UploadInput struct {
 	Content   []byte
 }
 
+type AvatarRepository interface {
+	Create(ctx context.Context, avatar domain.Avatar) error
+	CreateWithOutbox(
+		ctx context.Context,
+		avatar domain.Avatar,
+		event domain.OutboxEvent,
+	) error
+
+	GetByID(ctx context.Context, id string) (domain.Avatar, error)
+	GetCurrentByUserID(ctx context.Context, userID string) (domain.Avatar, error)
+	ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error)
+
+	Delete(ctx context.Context, id string, userID string) (domain.Avatar, error)
+	DeleteWithOutbox(
+		ctx context.Context,
+		id string,
+		userID string,
+		event domain.OutboxEvent,
+	) (domain.Avatar, error)
+}
+
 type AvatarService struct {
-	repository *postgres.AvatarRepository
+	repository AvatarRepository
 	storage    *s3.Client
-	broker     *rabbitmq.Client
 	bucket     string
 }
 
@@ -39,15 +60,13 @@ type AvatarContent struct {
 }
 
 func NewAvatarService(
-	repository *postgres.AvatarRepository,
+	repository AvatarRepository,
 	storage *s3.Client,
-	broker *rabbitmq.Client,
 	bucket string,
 ) *AvatarService {
 	return &AvatarService{
 		repository: repository,
 		storage:    storage,
-		broker:     broker,
 		bucket:     bucket,
 	}
 }
@@ -118,22 +137,43 @@ func (s *AvatarService) Upload(
 	messageID := uuid.NewString()
 
 	event := events.AvatarUploadEvent{
+
 		MessageID: messageID,
 		AvatarID:  avatar.ID,
 		UserID:    avatar.UserID,
 		S3Key:     avatar.S3Key,
 	}
 
-	if err := s.broker.PublishJSON(
-		ctx,
-		rabbitmq.UploadRoutingKey,
-		messageID,
-		event,
-	); err != nil {
+	payload, err := json.Marshal(event)
+
+	if err != nil {
+
 		return domain.Avatar{}, fmt.Errorf(
-			"publish avatar upload event: %w",
+			"marshal avatar upload event: %w",
 			err,
 		)
+
+	}
+
+	outboxEvent := domain.OutboxEvent{
+
+		MessageID:  messageID,
+		RoutingKey: rabbitmq.UploadRoutingKey,
+		Payload:    payload,
+	}
+
+	if err := s.repository.CreateWithOutbox(
+
+		ctx,
+		avatar,
+		outboxEvent,
+	); err != nil {
+
+		return domain.Avatar{}, fmt.Errorf(
+			"create avatar: %w",
+			err,
+		)
+
 	}
 
 	_ = img
@@ -259,7 +299,40 @@ func (s *AvatarService) Delete(
 		)
 	}
 
-	avatar, err := s.repository.Delete(ctx, id, userID)
+	avatar, err := s.repository.GetByID(ctx, id)
+	if err != nil {
+		if postgres.IsNotFound(err) {
+			return domain.Avatar{}, fmt.Errorf(
+				"%w: %q",
+				ErrNotFound,
+				id,
+			)
+		}
+
+		return domain.Avatar{}, fmt.Errorf(
+			"get avatar %q: %w",
+			id,
+			err,
+		)
+	}
+
+	if avatar.DeletedAt != nil {
+		return domain.Avatar{}, fmt.Errorf(
+			"%w: %q",
+			ErrNotFound,
+			id,
+		)
+	}
+
+	if avatar.UserID != userID {
+		return domain.Avatar{}, fmt.Errorf(
+			"%w: avatar %q belongs to another user",
+			ErrForbidden,
+			id,
+		)
+	}
+
+	avatar, err = s.repository.Delete(ctx, id, userID)
 	if err != nil {
 		if postgres.IsNotFound(err) {
 			return domain.Avatar{}, fmt.Errorf(
@@ -293,14 +366,38 @@ func (s *AvatarService) Delete(
 		S3Keys:    s3Keys,
 	}
 
-	if err := s.broker.PublishJSON(
-		ctx,
-		rabbitmq.DeleteRoutingKey,
-		messageID,
-		event,
-	); err != nil {
+	payload, err := json.Marshal(event)
+	if err != nil {
 		return domain.Avatar{}, fmt.Errorf(
-			"publish avatar delete event: %w",
+			"marshal avatar delete event: %w",
+			err,
+		)
+	}
+
+	outboxEvent := domain.OutboxEvent{
+		MessageID:  messageID,
+		RoutingKey: rabbitmq.DeleteRoutingKey,
+		Payload:    payload,
+	}
+
+	avatar, err = s.repository.DeleteWithOutbox(
+		ctx,
+		id,
+		userID,
+		outboxEvent,
+	)
+	if err != nil {
+		if postgres.IsNotFound(err) {
+			return domain.Avatar{}, fmt.Errorf(
+				"%w: %q",
+				ErrNotFound,
+				id,
+			)
+		}
+
+		return domain.Avatar{}, fmt.Errorf(
+			"delete avatar %q: %w",
+			id,
 			err,
 		)
 	}

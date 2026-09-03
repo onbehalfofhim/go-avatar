@@ -69,7 +69,16 @@ func main() {
 		}
 	}()
 
-	consumer := rabbitmq.NewConsumer(brokerClient)
+	consumer, err := rabbitmq.NewConsumer(brokerClient)
+	if err != nil {
+		log.Fatalf("create rabbitmq consumer: %v", err)
+	}
+	defer func() {
+		if err := consumer.Close(); err != nil {
+			log.Printf("close consumer: %v", err)
+		}
+	}()
+
 	repository := postgres.NewAvatarRepository(pool)
 	processedMessages := postgres.NewProcessedMessageRepository(pool)
 
@@ -79,6 +88,15 @@ func main() {
 	)
 
 	deleter := worker.NewAvatarDeleter(s3Client)
+
+	outboxRepository := postgres.NewOutboxRepository(pool)
+
+	outboxPublisher := worker.NewOutboxPublisher(
+		outboxRepository,
+		brokerClient,
+	)
+
+	go outboxPublisher.Run(ctx)
 
 	avatarWorker := worker.NewWorker(
 		consumer,

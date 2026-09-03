@@ -12,6 +12,8 @@ import (
 )
 
 func TestClient(t *testing.T) {
+	setTestEnv(t)
+
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
@@ -36,6 +38,8 @@ func TestClient(t *testing.T) {
 }
 
 func TestClientPublishJSON(t *testing.T) {
+	setTestEnv(t)
+
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)

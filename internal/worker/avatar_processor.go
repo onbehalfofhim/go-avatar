@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 
 	"go-avatar-service/internal/broker/events"
 	"go-avatar-service/internal/broker/rabbitmq"
@@ -106,7 +106,7 @@ func (p *AvatarProcessor) createThumbnails(
 	}
 	defer func() {
 		if err := body.Close(); err != nil {
-			log.Printf("close S3 response body: %v", err)
+			slog.Error("close S3 response body", "error", err)
 		}
 	}()
 

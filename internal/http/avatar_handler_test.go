@@ -18,8 +18,8 @@ import (
 	"go-avatar-service/internal/service"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
 
 func multipartRequest(
@@ -223,8 +223,7 @@ func TestAvatarHandlerUploadTooLarge(t *testing.T) {
 	response := httptest.NewRecorder()
 
 	router.ServeHTTP(response, request)
-
-	require.Equal(t, http.StatusBadRequest, response.Code)
+	require.Equal(t, http.StatusRequestEntityTooLarge, response.Code)
 }
 
 func TestAvatarHandlerGetByIDOriginal(t *testing.T) {
@@ -714,6 +713,35 @@ func TestAvatarHandlerDeleteNotFound(t *testing.T) {
 	router.ServeHTTP(response, request)
 
 	require.Equal(t, http.StatusNotFound, response.Code)
+}
+
+func TestAvatarHandlerDeleteForbidden(t *testing.T) {
+	ctrl := gomock.NewController(t)
+
+	serviceMock := mocks.NewMockAvatarService(ctrl)
+
+	serviceMock.
+		EXPECT().
+		Delete(gomock.Any(), "avatar-123", "user-123").
+		Return(domain.Avatar{}, service.ErrForbidden)
+
+	handler := NewAvatarHandler(serviceMock)
+
+	router := chi.NewRouter()
+	handler.RegisterRoutes(router)
+
+	request := httptest.NewRequest(
+		http.MethodDelete,
+		"/api/v1/avatars/avatar-123",
+		nil,
+	)
+	request.Header.Set("X-User-ID", "user-123")
+
+	response := httptest.NewRecorder()
+
+	router.ServeHTTP(response, request)
+
+	require.Equal(t, http.StatusForbidden, response.Code)
 }
 
 func TestAvatarHandlerDeletePassesUserID(t *testing.T) {

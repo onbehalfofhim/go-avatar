@@ -80,7 +80,6 @@ func main() {
 	avatarService := service.NewAvatarService(
 		repository,
 		storage,
-		broker,
 		cfg.MinIOBucket,
 	)
 

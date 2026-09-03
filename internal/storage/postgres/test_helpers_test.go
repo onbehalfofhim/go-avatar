@@ -12,7 +12,18 @@ import (
 	"go-avatar-service/internal/domain"
 )
 
+func setTestEnv(t *testing.T) {
+	t.Helper()
+
+	t.Setenv("POSTGRES_PASSWORD", "avatar")
+	t.Setenv("MINIO_ACCESS_KEY", "minio")
+	t.Setenv("MINIO_SECRET_KEY", "miniosecret")
+	t.Setenv("RABBITMQ_URL", "amqp://avatar:avatar@localhost:5672/")
+}
+
 func testPool(t *testing.T) *pgxpool.Pool {
+	setTestEnv(t)
+
 	t.Helper()
 
 	cfg, err := config.Load()

@@ -11,6 +11,8 @@ import (
 )
 
 func TestConsumerReceivesMessage(t *testing.T) {
+	setTestEnv(t)
+
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
@@ -32,7 +34,15 @@ func TestConsumerReceivesMessage(t *testing.T) {
 		}
 	}()
 
-	consumer := NewConsumer(client)
+	consumer, err := NewConsumer(client)
+	if err != nil {
+		t.Fatalf("create consumer: %v", err)
+	}
+	defer func() {
+		if err := consumer.Close(); err != nil {
+			t.Errorf("close consumer: %v", err)
+		}
+	}()
 
 	messages, err := consumer.Consume(
 		ctx,
@@ -87,6 +97,8 @@ func TestConsumerReceivesMessage(t *testing.T) {
 }
 
 func TestClientPublishRetry(t *testing.T) {
+	setTestEnv(t)
+
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)
@@ -108,7 +120,15 @@ func TestClientPublishRetry(t *testing.T) {
 		}
 	}()
 
-	consumer := NewConsumer(client)
+	consumer, err := NewConsumer(client)
+	if err != nil {
+		t.Fatalf("create consumer: %v", err)
+	}
+	defer func() {
+		if err := consumer.Close(); err != nil {
+			t.Errorf("close consumer: %v", err)
+		}
+	}()
 
 	messages, err := consumer.Consume(
 		ctx,

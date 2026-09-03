@@ -3,7 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 
 	"go-avatar-service/internal/broker/rabbitmq"
@@ -58,7 +58,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("start avatar delete consumer: %w", err)
 	}
 
-	log.Println("Avatar worker started")
+	slog.Info("avatar worker started")
 
 	for {
 		select {
@@ -72,10 +72,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 
 			if err := w.processUploadMessage(ctx, message); err != nil {
-				log.Printf(
-					"process upload message %q: %v",
-					message.ID,
-					err,
+				slog.Error(
+					"process upload message",
+					"message_id", message.ID,
+					"error", err,
 				)
 			}
 
@@ -86,10 +86,10 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 
 			if err := w.processDeleteMessage(ctx, message); err != nil {
-				log.Printf(
-					"process delete message %q: %v",
-					message.ID,
-					err,
+				slog.Error(
+					"process delete message",
+					"message_id", message.ID,
+					"error", err,
 				)
 			}
 		}

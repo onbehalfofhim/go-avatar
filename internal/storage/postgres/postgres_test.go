@@ -9,6 +9,8 @@ import (
 )
 
 func TestNewPool(t *testing.T) {
+	setTestEnv(t)
+
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)

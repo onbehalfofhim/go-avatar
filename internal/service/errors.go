@@ -5,4 +5,5 @@ import "errors"
 var (
 	ErrInvalidInput = errors.New("invalid input")
 	ErrNotFound     = errors.New("avatar not found")
+	ErrForbidden    = errors.New("forbidden")
 )
