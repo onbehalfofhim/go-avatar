@@ -1,39 +1,35 @@
 # GophProfile
 
-Сервис управления пользовательскими аватарами на Go.
+GophProfile — сервис управления пользовательскими аватарами на Go.
 
-GophProfile принимает изображения, сохраняет оригиналы в S3-совместимое хранилище, хранит метаданные в PostgreSQL и асинхронно создаёт thumbnails через RabbitMQ и отдельный worker.
+Сервис принимает изображения, сохраняет оригиналы в S3-совместимом хранилище, хранит метаданные в PostgreSQL и асинхронно создаёт thumbnails отдельным worker-процессом через RabbitMQ.
 
 ## Возможности
 
 - загрузка пользовательских аватаров;
 - поддержка JPEG, PNG и WebP;
-- ограничение размера файла — **10 MB**;
-- хранение оригиналов в S3/MinIO;
+- ограничение размера изображения — 10 MiB;
+- хранение оригиналов и thumbnails в S3/MinIO;
 - асинхронная обработка изображений;
-- создание thumbnails:
-  - `100x100`;
-  - `300x300`;
+- thumbnails размером `100x100` и `300x300`;
 - thumbnails сохраняются в JPEG;
-- сохранение пропорций изображения с center crop перед resize;
+- center crop с последующим resize;
 - несколько аватаров на одного пользователя;
-- один текущий (`active`) аватар на пользователя;
+- не более одного активного аватара пользователя;
 - история предыдущих аватаров;
 - soft delete в PostgreSQL;
 - асинхронное физическое удаление объектов из S3;
-- idempotent processing сообщений RabbitMQ;
-- retry с exponential backoff;
+- idempotent processing RabbitMQ-сообщений;
+- retry с задержками `5s`, `10s`, `20s`;
 - dead-letter queue для сообщений, которые не удалось обработать;
-- health-check PostgreSQL, S3 и RabbitMQ;
-- web-интерфейс для загрузки и просмотра аватаров;
-- Docker Compose для локального запуска;
+- transactional outbox для надёжной передачи событий из PostgreSQL в RabbitMQ;
+- health check PostgreSQL, S3 и RabbitMQ;
+- встроенный web-интерфейс;
 - unit- и integration-тесты.
-
----
 
 ## Архитектура
 
-Сервис состоит из HTTP API, PostgreSQL, MinIO и RabbitMQ. Обработка изображений и удаление файлов выполняются отдельным worker-процессом.
+Сервис состоит из HTTP API, PostgreSQL, S3-compatible storage (MinIO), RabbitMQ и отдельного worker-процесса.
 
 ```text
                          ┌──────────────────┐
@@ -46,31 +42,36 @@ GophProfile принимает изображения, сохраняет ори
                          │      Go API      │
                          └───────┬─────┬────┘
                                  │     │
-                    metadata     │     │ original image
+                      metadata   │     │ original image
                                  │     │
                                  ▼     ▼
                          ┌──────────┐ ┌──────────┐
                          │PostgreSQL│ │  MinIO   │
                          │ metadata │ │   S3     │
-                         └──────────┘ └────┬─────┘
-                                           │
-                                           │
-                              ┌────────────▼────────────┐
-                              │       RabbitMQ          │
-                              │                         │
-                              │ upload / delete events  │
-                              │ retry queues / DLQ      │
-                              └────────────┬────────────┘
-                                           │
-                                           ▼
-                                  ┌─────────────────┐
-                                  │      Worker     │
-                                  │                 │
-                                  │ thumbnails      │
-                                  │ S3 deletion     │
-                                  │ retries         │
-                                  │ idempotency     │
-                                  └─────────────────┘
+                         └─────┬────┘ └────┬─────┘
+                               │           │
+                         outbox events     │
+                               │           │
+                               ▼           │
+                         ┌──────────┐      │
+                         │  Outbox  │      │
+                         │ publisher│      │
+                         └─────┬────┘      │
+                               │           │
+                               ▼           │
+                         ┌─────────────────┐
+                         │    RabbitMQ      │
+                         │ events / retry   │
+                         │       / DLQ      │
+                         └────────┬─────────┘
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │     Worker      │
+                         │ thumbnails /    │
+                         │ S3 deletion /   │
+                         │ retry / idempot. │
+                         └─────────────────┘
 ```
 
 ### Upload flow
@@ -82,25 +83,31 @@ Client
   ▼
 HTTP Server
   │
-  ├── validate request
+  ├── validate request and image
   ├── save original to S3
-  ├── create avatar record
-  └── publish AvatarUploadEvent
-          │
-          ▼
-      RabbitMQ
-          │
-          ▼
-       Worker
-          │
-          ├── download original
-          ├── decode image
-          ├── center crop
-          ├── create 100x100 thumbnail
-          ├── create 300x300 thumbnail
-          ├── upload thumbnails to S3
-          └── mark processing as completed
+  └── PostgreSQL transaction:
+        ├── create avatar
+        └── create outbox event
+                │
+                ▼
+          Outbox publisher
+                │
+                ▼
+            RabbitMQ
+                │
+                ▼
+             Worker
+                │
+                ├── download original
+                ├── decode image
+                ├── center crop
+                ├── create 100x100 thumbnail
+                ├── create 300x300 thumbnail
+                ├── upload thumbnails to S3
+                └── mark processing as completed
 ```
+
+Transactional outbox позволяет не терять событие между изменением состояния в PostgreSQL и публикацией в RabbitMQ: событие сначала сохраняется в `outbox_events`, а отдельный publisher публикует его в RabbitMQ.
 
 ### Delete flow
 
@@ -111,37 +118,37 @@ Client
   ▼
 HTTP Server
   │
-  ├── mark avatar as deleted
-  └── publish AvatarDeleteEvent
-          │
-          ▼
-      RabbitMQ
-          │
-          ▼
-       Worker
-          │
-          └── delete original + thumbnails from S3
+  └── PostgreSQL transaction:
+        ├── mark avatar as deleted
+        └── create outbox event
+                │
+                ▼
+          Outbox publisher
+                │
+                ▼
+            RabbitMQ
+                │
+                ▼
+             Worker
+                │
+                └── delete original + thumbnails from S3
 ```
 
-Удаление является асинхронным: запись в PostgreSQL сохраняется, а физическое удаление файлов из S3 выполняется worker-ом.
-
----
+Удаление является асинхронным: запись в PostgreSQL сохраняется как soft-deleted, а физическое удаление объектов из S3 выполняется worker-ом.
 
 ## Технологический стек
 
 | Компонент | Технология |
 |---|---|
-| Language | Go |
-| HTTP | net/http |
+| Language | Go 1.26 |
+| HTTP | `net/http` + `chi` |
 | Database | PostgreSQL |
 | Object storage | S3-compatible storage / MinIO |
 | Message broker | RabbitMQ |
 | Image processing | Go image packages + `golang.org/x/image` |
 | Containers | Docker / Docker Compose |
-| Tests | Go testing, testify, testcontainers-go |
+| Tests | Go testing + Testify |
 | Static analysis | `go vet`, `golangci-lint` |
-
----
 
 ## Структура проекта
 
@@ -157,25 +164,17 @@ HTTP Server
 │   ├── broker/
 │   │   ├── events/
 │   │   └── rabbitmq/
-│   │
 │   ├── config/
-│   │
 │   ├── domain/
-│   │
 │   ├── health/
-│   │
 │   ├── http/
 │   │   └── mocks/
-│   │
 │   ├── image/
-│   │
 │   ├── service/
-│   │
 │   ├── storage/
 │   │   ├── postgres/
 │   │   │   └── migrations/
 │   │   └── s3/
-│   │
 │   └── worker/
 │
 ├── web/
@@ -194,59 +193,68 @@ HTTP Server
 
 Точка входа HTTP-сервера.
 
-Сервер создаёт подключения к PostgreSQL, MinIO и RabbitMQ, запускает миграции и HTTP API.
+При запуске сервер:
+
+- загружает конфигурацию;
+- подключается к PostgreSQL;
+- применяет embedded database migrations;
+- подключается к MinIO/S3;
+- создаёт bucket при необходимости;
+- подключается к RabbitMQ;
+- запускает HTTP API и web-интерфейс.
 
 ### `cmd/worker`
 
-Точка входа фонового worker-а.
+Точка входа фонового worker-процесса.
 
-Worker подписывается на очереди обработки загрузок и удаления объектов.
+Worker:
+
+- получает upload/delete события из RabbitMQ;
+- выполняет обработку изображений;
+- удаляет объекты из S3;
+- отслеживает обработанные message IDs;
+- выполняет retry и отправляет окончательно неуспешные сообщения в DLQ.
 
 ### `internal/domain`
 
-Доменные модели и статусы аватара.
+Доменные модели аватара, статусы и модель outbox-события.
 
 ### `internal/http`
 
-HTTP handlers и маршрутизация API.
+HTTP handlers, маршрутизация и HTTP-модели ответов.
+
+### `internal/service`
+
+Бизнес-логика работы с аватарами.
 
 ### `internal/storage/postgres`
 
-Работа с PostgreSQL и миграции.
+Работа с PostgreSQL, репозитории и database migrations.
 
 ### `internal/storage/s3`
 
-Работа с S3-совместимым object storage.
+Работа с S3-compatible object storage.
 
 ### `internal/broker/rabbitmq`
 
-RabbitMQ client, consumer, exchange, queues и retry infrastructure.
+RabbitMQ client, topology, producer, consumer, retry queues и DLQ.
 
 ### `internal/worker`
 
-Фоновая обработка avatar events:
-
-- создание thumbnails;
-- удаление S3 objects;
-- retries;
-- idempotency.
+Обработка RabbitMQ-сообщений, генерация thumbnails, удаление S3-объектов и idempotency.
 
 ### `internal/image`
 
-Валидация изображений и создание thumbnails.
+Проверка формата изображения, декодирование, center crop и генерация thumbnails.
 
----
+## Быстрый запуск
 
-# Быстрый запуск
+### Требования
 
-## Требования
-
-Для локального запуска необходимы:
-
-- Go 1.25+;
+- Go 1.26;
 - Docker;
 - Docker Compose;
-- `golangci-lint` — для статического анализа.
+- `golangci-lint` — только если требуется запускать lint локально.
 
 Проверить версии:
 
@@ -254,23 +262,18 @@ RabbitMQ client, consumer, exchange, queues и retry infrastructure.
 go version
 docker --version
 docker compose version
-golangci-lint --version
 ```
 
----
-
-## 1. Клонирование
+### 1. Клонирование
 
 ```bash
 git clone https://github.com/onbehalfofhim/go-avatar.git
 cd go-avatar
 ```
 
----
+### 2. Конфигурация
 
-## 2. Конфигурация
-
-Создать `.env`:
+Для Docker Compose достаточно создать `.env` из примера:
 
 ```bash
 cp .env.example .env
@@ -290,77 +293,26 @@ MINIO_ROOT_PASSWORD=miniosecret
 MINIO_PORT=9000
 MINIO_CONSOLE_PORT=9001
 
+MINIO_ENDPOINT=localhost:9000
+MINIO_ACCESS_KEY=minio
+MINIO_SECRET_KEY=miniosecret
+MINIO_BUCKET=avatars
+MINIO_USE_SSL=false
+
 RABBITMQ_USER=avatar
 RABBITMQ_PASSWORD=avatar
 RABBITMQ_PORT=5672
 RABBITMQ_MANAGEMENT_PORT=15672
+RABBITMQ_URL=amqp://avatar:avatar@localhost:5672/
 
 HTTP_PORT=8080
 ```
 
-Для запуска внутри Docker Compose сервисы используют внутренние имена:
+Секретные параметры, необходимые приложению (`POSTGRES_PASSWORD`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` и `RABBITMQ_URL`), должны быть заданы явно.
 
-```text
-postgres:5432
-minio:9000
-rabbitmq:5672
-```
+### 3. Запуск через Docker Compose
 
----
-
-## 3. Запуск инфраструктуры
-
-Запустить PostgreSQL, MinIO и RabbitMQ:
-
-```bash
-docker compose up -d postgres minio rabbitmq
-```
-
-Проверить состояние:
-
-```bash
-docker compose ps
-```
-
-Все три инфраструктурных сервиса должны перейти в состояние `healthy`.
-
----
-
-## 4. Запуск приложения
-
-### HTTP server
-
-В одном терминале:
-
-```bash
-go run ./cmd/server
-```
-
-### Worker
-
-Во втором терминале:
-
-```bash
-go run ./cmd/worker
-```
-
-После запуска:
-
-```text
-HTTP API: http://localhost:8080
-```
-
-Web-интерфейс доступен по адресу:
-
-```text
-http://localhost:8080/
-```
-
----
-
-# Запуск всего проекта через Docker Compose
-
-Можно собрать и запустить server и worker вместе с инфраструктурой:
+Рекомендуемый способ запуска:
 
 ```bash
 docker compose up --build
@@ -378,15 +330,13 @@ docker compose up --build -d
 docker compose ps
 ```
 
-Посмотреть логи:
+После запуска:
 
-```bash
-docker compose logs -f server
-```
-
-```bash
-docker compose logs -f worker
-```
+- Web UI: `http://localhost:8080/`
+- HTTP API: `http://localhost:8080`
+- Health: `http://localhost:8080/health`
+- MinIO Console: `http://localhost:9001`
+- RabbitMQ Management UI: `http://localhost:15672`
 
 Остановить сервисы:
 
@@ -402,9 +352,35 @@ docker compose down -v
 
 > `docker compose down -v` удаляет локальные данные PostgreSQL, MinIO и RabbitMQ.
 
----
+### Запуск server и worker без контейнеров приложения
 
-# Health check
+Можно запустить инфраструктуру отдельно:
+
+```bash
+docker compose up -d postgres minio rabbitmq
+```
+
+Перед запуском Go-процессов переменные из `.env` должны быть доступны в окружении shell:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+Запустить HTTP server:
+
+```bash
+go run ./cmd/server
+```
+
+В другом терминале запустить worker:
+
+```bash
+go run ./cmd/worker
+```
+
+## Health check
 
 ```http
 GET /health
@@ -420,40 +396,34 @@ curl http://localhost:8080/health
 
 ```json
 {
+  "status": "ok",
   "checks": {
     "postgres": "ok",
     "rabbitmq": "ok",
     "s3": "ok"
-  },
-  "status": "ok"
+  }
 }
 ```
 
-Health endpoint проверяет доступность:
+Если хотя бы одна зависимость недоступна, endpoint возвращает HTTP `503 Service Unavailable` и показывает состояние отдельных checks.
 
-- PostgreSQL;
-- RabbitMQ;
-- S3/MinIO.
-
----
-
-# API
+## API
 
 Все API endpoints находятся под `/api/v1`.
 
-## User ID
+### User ID
 
-Аутентификация пользователя в MVP выполняется через HTTP header:
+В MVP идентификатор пользователя передаётся через HTTP header:
 
 ```http
 X-User-ID: <user-id>
 ```
 
-User ID может быть любой непустой строкой.
+Для `DELETE /api/v1/users/{user_id}/avatar` значение header должно совпадать с `{user_id}`.
 
 ---
 
-## Upload avatar
+### Upload avatar
 
 ```http
 POST /api/v1/avatars
@@ -471,11 +441,13 @@ Request:
 multipart/form-data
 ```
 
-Поле:
+Поле файла:
 
 ```text
 file
 ```
+
+Также handler принимает поле `image`.
 
 Пример:
 
@@ -498,23 +470,21 @@ curl -X POST http://localhost:8080/api/v1/avatars \
 }
 ```
 
-После загрузки изображение обрабатывается асинхронно worker-ом.
-
 Поддерживаемые форматы:
 
 - JPEG;
 - PNG;
 - WebP.
 
-Максимальный размер:
+Максимальный размер изображения — `10 MiB`.
 
-```text
-10 MB
-```
+При превышении лимита возвращается `413 Request Entity Too Large`.
+
+После загрузки изображение обрабатывается worker-ом асинхронно.
 
 ---
 
-# Get avatar image
+### Get avatar image
 
 ```http
 GET /api/v1/avatars/{avatar_id}
@@ -522,19 +492,19 @@ GET /api/v1/avatars/{avatar_id}
 
 По умолчанию возвращается оригинальное изображение.
 
-### Original
+Оригинал:
 
 ```bash
 curl http://localhost:8080/api/v1/avatars/{avatar_id}
 ```
 
-### 100x100
+Thumbnail `100x100`:
 
 ```bash
 curl "http://localhost:8080/api/v1/avatars/{avatar_id}?size=100"
 ```
 
-### 300x300
+Thumbnail `300x300`:
 
 ```bash
 curl "http://localhost:8080/api/v1/avatars/{avatar_id}?size=300"
@@ -542,20 +512,17 @@ curl "http://localhost:8080/api/v1/avatars/{avatar_id}?size=300"
 
 Поддерживаемые значения `size`:
 
-```text
-100
-300
-```
-
-Оригинал возвращается без указания `size`.
+- отсутствует или `original` — оригинал;
+- `100` — thumbnail `100x100`;
+- `300` — thumbnail `300x300`.
 
 Thumbnails создаются только в JPEG.
 
-Если thumbnail ещё не был создан worker-ом, соответствующий ресурс может быть недоступен до завершения обработки.
+Если запрошенный thumbnail ещё не создан worker-ом, endpoint возвращает `404`.
 
 ---
 
-# Get current user avatar
+### Get current user avatar
 
 ```http
 GET /api/v1/users/{user_id}/avatar
@@ -569,11 +536,11 @@ curl http://localhost:8080/api/v1/users/user-123/avatar
 
 Endpoint возвращает текущий активный аватар пользователя.
 
-При загрузке нового аватара предыдущий текущий аватар становится неактивным.
+При загрузке нового аватара предыдущий активный аватар становится неактивным.
 
 ---
 
-# List user avatars
+### List user avatars
 
 ```http
 GET /api/v1/users/{user_id}/avatars
@@ -585,17 +552,15 @@ GET /api/v1/users/{user_id}/avatars
 curl http://localhost:8080/api/v1/users/user-123/avatars
 ```
 
-Endpoint возвращает историю аватаров пользователя.
+Endpoint возвращает историю неудалённых аватаров пользователя.
 
-В списке:
+Результаты отсортированы от новых к старым.
 
-- присутствуют текущий и старые аватары;
-- отсутствуют удалённые аватары;
-- результаты отсортированы от новых к старым.
+Удалённые аватары в список не входят.
 
 ---
 
-# Get avatar metadata
+### Get avatar metadata
 
 ```http
 GET /api/v1/avatars/{avatar_id}/metadata
@@ -607,22 +572,23 @@ GET /api/v1/avatars/{avatar_id}/metadata
 curl http://localhost:8080/api/v1/avatars/{avatar_id}/metadata
 ```
 
-Метаданные включают информацию об аватаре, в частности:
+Ответ содержит:
 
-- ID;
-- user ID;
-- имя исходного файла;
-- MIME type;
-- размер;
-- статус загрузки;
-- статус обработки;
-- дату создания;
-- дату обновления;
-- информацию о thumbnails.
+- `id`;
+- `user_id`;
+- `file_name`;
+- `mime_type`;
+- `size_bytes`;
+- `upload_status`;
+- `processing_status`;
+- `is_active`;
+- `created_at`;
+- `updated_at`;
+- `deleted_at`.
 
 ---
 
-# Delete avatar
+### Delete avatar
 
 ```http
 DELETE /api/v1/avatars/{avatar_id}
@@ -642,23 +608,30 @@ curl -X DELETE \
   -H "X-User-ID: user-123"
 ```
 
-Удаление выполняется в два этапа:
+Успешный ответ:
 
-1. avatar помечается удалённым в PostgreSQL;
-2. публикуется `AvatarDeleteEvent`;
-3. worker удаляет соответствующие объекты из S3.
+```http
+204 No Content
+```
 
-Запись в PostgreSQL физически не удаляется.
+Удаление выполняется асинхронно:
 
-Удалённый avatar:
+1. аватар помечается удалённым в PostgreSQL;
+2. событие удаления попадает в outbox;
+3. outbox publisher публикует событие в RabbitMQ;
+4. worker удаляет оригинал и thumbnails из S3.
 
-- не возвращается через `GET /api/v1/avatars/{id}`;
-- не возвращается в списке пользователя;
-- остаётся в базе как историческая запись.
+Если аватар существует, но принадлежит другому пользователю, возвращается:
+
+```http
+403 Forbidden
+```
+
+Удалённая запись физически не удаляется из PostgreSQL.
 
 ---
 
-# Delete current user avatar
+### Delete current user avatar
 
 ```http
 DELETE /api/v1/users/{user_id}/avatar
@@ -678,54 +651,46 @@ curl -X DELETE \
   -H "X-User-ID: user-123"
 ```
 
-Удаляется текущий активный avatar пользователя.
+Удаляется текущий активный аватар пользователя.
 
-Автоматическое назначение предыдущего avatar текущим после удаления не выполняется.
+После удаления предыдущий аватар автоматически активным не становится.
 
----
+Успешный ответ:
 
-# Image processing
-
-После успешной загрузки worker получает событие:
-
-```json
-{
-  "avatar_id": "...",
-  "user_id": "...",
-  "s3_key": "avatars/.../original.jpg"
-}
+```http
+204 No Content
 ```
 
-Worker:
+## Image processing
+
+Worker обрабатывает upload event и:
 
 1. скачивает оригинал из S3;
-2. проверяет формат изображения;
-3. декодирует изображение;
-4. выполняет center crop до квадрата;
-5. масштабирует изображение;
-6. сохраняет thumbnail в JPEG;
-7. загружает thumbnails в S3;
-8. сохраняет S3 keys в PostgreSQL;
-9. переводит processing status в `completed`.
+2. декодирует изображение;
+3. выполняет center crop до квадрата;
+4. масштабирует изображение;
+5. создаёт thumbnail `100x100`;
+6. создаёт thumbnail `300x300`;
+7. сохраняет thumbnails в JPEG;
+8. загружает thumbnails в S3;
+9. сохраняет S3 keys в PostgreSQL;
+10. переводит `processing_status` в `completed`.
 
-Поддерживаются размеры:
+Пример структуры объектов:
 
 ```text
-100x100
-300x300
+avatars/
+└── {avatar_id}/
+    ├── original.jpg
+    ├── 100x100.jpg
+    └── 300x300.jpg
 ```
 
-### Center crop
+Расширение оригинала зависит от исходного формата.
 
-Исходное изображение сначала обрезается до центрального квадрата с сохранением пропорций содержимого, после чего масштабируется до необходимого размера.
+## Storage
 
----
-
-# Storage
-
-## PostgreSQL
-
-PostgreSQL хранит metadata аватаров.
+### PostgreSQL
 
 Основная таблица:
 
@@ -733,7 +698,7 @@ PostgreSQL хранит metadata аватаров.
 avatars
 ```
 
-В ней хранятся:
+Хранит metadata аватаров:
 
 - `id`;
 - `user_id`;
@@ -749,48 +714,31 @@ avatars
 - `updated_at`;
 - `deleted_at`.
 
-Для пользователя гарантируется не более одного активного неудалённого avatar.
+Для пользователя допускается не более одного активного неудалённого аватара. Это обеспечивается partial unique index.
 
-Это обеспечивается partial unique index:
-
-```text
-(user_id)
-WHERE is_active = TRUE AND deleted_at IS NULL
-```
-
-Также используется таблица:
+Также используются:
 
 ```text
 processed_messages
 ```
 
-для idempotency обработки RabbitMQ сообщений.
-
----
-
-## S3 / MinIO
-
-Оригинал и thumbnails хранятся в S3-compatible storage.
-
-Пример структуры:
+для idempotency RabbitMQ-сообщений и:
 
 ```text
-avatars/
-└── {avatar_id}/
-    ├── original.jpg
-    ├── 100x100.jpg
-    └── 300x300.jpg
+outbox_events
 ```
 
-Конкретное расширение оригинала зависит от исходного формата.
+для transactional outbox.
 
-Thumbnails всегда сохраняются как JPEG.
+Статусы `upload_status` и `processing_status` представлены PostgreSQL ENUM.
 
----
+### S3 / MinIO
 
-# RabbitMQ
+Оригиналы и thumbnails хранятся в S3-compatible object storage.
 
-Для асинхронной обработки используется RabbitMQ.
+MinIO используется в локальном окружении.
+
+## RabbitMQ
 
 Основной exchange:
 
@@ -812,7 +760,7 @@ avatars.processing
 avatars.deletion
 ```
 
-Для повторных попыток обработки используются retry queues с задержками:
+Retry queues используют задержки:
 
 ```text
 5 seconds
@@ -820,7 +768,7 @@ avatars.deletion
 20 seconds
 ```
 
-После исчерпания retry message попадает в dead-letter queue:
+После исчерпания retry сообщение отправляется в:
 
 ```text
 avatars.dlq
@@ -832,7 +780,7 @@ avatars.dlq
 avatar.uploaded
 ```
 
-Используется для запуска image processing.
+Запускает обработку изображения worker-ом.
 
 ### Delete event
 
@@ -840,35 +788,29 @@ avatar.uploaded
 avatar.deleted
 ```
 
-Используется для физического удаления файлов из S3.
+Запускает физическое удаление объектов из S3.
 
----
+## Retry и idempotency
 
-# Retry и idempotency
+Worker не подтверждает сообщение до завершения бизнес-операции.
 
-Worker не удаляет сообщение сразу после получения.
-
-При успешной обработке:
+Упрощённый успешный flow:
 
 ```text
+receive message
+      ↓
+check message_id
+      ↓
 process
-  ↓
+      ↓
 mark message as processed
-  ↓
+      ↓
 ACK
 ```
 
-Для уже обработанного сообщения бизнес-операция повторно не выполняется.
+Обработанные message IDs сохраняются в PostgreSQL в таблице `processed_messages`.
 
-Идентификатор RabbitMQ message используется как `message_id`.
-
-Обработанные message IDs сохраняются в PostgreSQL:
-
-```text
-processed_messages
-```
-
-При ошибке worker использует retry queues:
+Если обработка завершается ошибкой, worker публикует сообщение в соответствующую retry queue.
 
 ```text
 attempt 1 → 5s
@@ -876,20 +818,18 @@ attempt 2 → 10s
 attempt 3 → 20s
 ```
 
-Если все попытки исчерпаны, сообщение отправляется в DLQ.
+После исчерпания retry сообщение отклоняется и попадает в DLQ.
 
----
+## Avatar statuses
 
-# Avatar statuses
-
-## Upload status
+### Upload status
 
 ```text
 uploaded
 deleted
 ```
 
-## Processing status
+### Processing status
 
 ```text
 pending
@@ -898,11 +838,12 @@ completed
 failed
 ```
 
-После загрузки avatar первоначально находится в состоянии:
+После загрузки:
 
 ```text
 upload_status = uploaded
 processing_status = pending
+is_active = true
 ```
 
 После успешной обработки:
@@ -911,7 +852,7 @@ processing_status = pending
 processing_status = completed
 ```
 
-При удалении:
+После удаления:
 
 ```text
 upload_status = deleted
@@ -919,9 +860,7 @@ is_active = false
 deleted_at != NULL
 ```
 
----
-
-# Database migrations
+## Database migrations
 
 Миграции находятся в:
 
@@ -929,17 +868,17 @@ deleted_at != NULL
 internal/storage/postgres/migrations
 ```
 
-Текущие миграции создают:
+Они создают:
 
 - `avatars`;
 - `processed_messages`;
-- необходимые индексы и ограничения.
+- `outbox_events`;
+- PostgreSQL ENUM для avatar statuses;
+- индексы и ограничения.
 
-Миграции применяются приложением при запуске.
+При запуске HTTP server migrations применяются автоматически.
 
----
-
-# Testing
+## Testing
 
 Запустить все тесты:
 
@@ -947,18 +886,41 @@ internal/storage/postgres/migrations
 go test ./...
 ```
 
-Запустить тесты с coverage:
+Запустить с coverage:
 
 ```bash
 go test -cover ./...
 ```
 
+Integration-тесты PostgreSQL, S3 и RabbitMQ используют внешние сервисы из конфигурации. Они не поднимают зависимости через Testcontainers.
 
-Для integration-тестов используются Docker-контейнеры необходимых зависимостей.
+Для локального запуска integration-тестов удобно предварительно запустить инфраструктуру:
 
----
+```bash
+docker compose up -d postgres minio rabbitmq
+```
 
-# Code quality
+и загрузить переменные окружения:
+
+```bash
+set -a
+source .env
+set +a
+```
+
+Затем:
+
+```bash
+go test ./...
+```
+
+Для проверки race conditions:
+
+```bash
+go test -race ./...
+```
+
+## Code quality
 
 Форматирование:
 
@@ -993,11 +955,7 @@ go test ./...
 golangci-lint run
 ```
 
-Все проверки должны завершаться без ошибок.
-
----
-
-# Docker
+## Docker
 
 Проект использует multi-stage Dockerfile.
 
@@ -1020,17 +978,15 @@ docker build --target server -t gophprofile-server .
 docker build --target worker --build-arg TARGET=worker -t gophprofile-worker .
 ```
 
-Запуск production-like окружения рекомендуется выполнять через:
+Для локального запуска всего окружения рекомендуется:
 
 ```bash
 docker compose up --build
 ```
 
----
+## Local infrastructure
 
-# Local infrastructure
-
-Docker Compose поднимает следующие сервисы:
+Docker Compose поднимает:
 
 | Service | Port | Purpose |
 |---|---:|---|
@@ -1041,139 +997,7 @@ Docker Compose поднимает следующие сервисы:
 | RabbitMQ Management | `15672` | Broker administration |
 | HTTP Server | `8080` | REST API + Web UI |
 
-MinIO Console:
+Management interfaces:
 
-```text
-http://localhost:9001
-```
-
-RabbitMQ Management UI:
-
-```text
-http://localhost:15672
-```
-
-Credentials задаются через `.env`.
-
----
-
-# Web interface
-
-Сервис также содержит простой web-интерфейс для работы с avatar API.
-
-После запуска server откройте:
-
-```text
-http://localhost:8080/
-```
-
-Web UI позволяет выполнять основные операции с аватарами через HTTP API.
-
----
-
-# Example: complete upload flow
-
-Создадим avatar:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/avatars \
-  -H "X-User-ID: user-123" \
-  -F "file=@./avatar.png"
-```
-
-Ответ:
-
-```json
-{
-  "id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "status": "pending"
-}
-```
-
-Проверим metadata:
-
-```bash
-curl \
-  http://localhost:8080/api/v1/avatars/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/metadata
-```
-
-После завершения обработки можно получить оригинал:
-
-```bash
-curl \
-  http://localhost:8080/api/v1/avatars/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  --output avatar.jpg
-```
-
-Thumbnail:
-
-```bash
-curl \
-  "http://localhost:8080/api/v1/avatars/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx?size=100" \
-  --output avatar-100.jpg
-```
-
-И второй размер:
-
-```bash
-curl \
-  "http://localhost:8080/api/v1/avatars/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx?size=300" \
-  --output avatar-300.jpg
-```
-
----
-
-# Error handling
-
-API валидирует:
-
-- наличие `X-User-ID`, когда он требуется;
-- непустой user ID;
-- наличие multipart file;
-- размер файла;
-- фактический формат изображения;
-- существование avatar;
-- принадлежность avatar пользователю при операциях удаления;
-- допустимое значение `size`.
-
-Worker отдельно обрабатывает ошибки:
-
-- RabbitMQ;
-- PostgreSQL;
-- S3;
-- декодирования изображений;
-- создания thumbnails.
-
-Ошибки фоновой обработки не блокируют HTTP request после постановки операции в очередь.
-
----
-
-# Development workflow
-
-Основная ветка разработки:
-
-```text
-dev
-```
-
-Перед изменениями:
-
-```bash
-git checkout dev
-git pull
-```
-
-После изменений рекомендуется проверить:
-
-```bash
-gofmt -w .
-go vet ./...
-go test ./...
-golangci-lint run
-```
-
-Проверить состояние:
-
-```bash
-git status
-```
+- MinIO Console: `http://localhost:9001`
+- RabbitMQ Management UI: `http://localhost:15672`
