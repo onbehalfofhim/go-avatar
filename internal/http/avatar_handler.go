@@ -13,6 +13,7 @@ import (
 
 	"go-avatar-service/internal/domain"
 	"go-avatar-service/internal/image"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -161,7 +162,10 @@ func (h *AvatarHandler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			slog.Error("close uploaded file", "error", err)
+			observability.LoggerFromContext(r.Context(), slog.Default()).Error(
+				"close uploaded file",
+				"error", err,
+			)
 		}
 	}()
 
@@ -219,7 +223,10 @@ func (h *AvatarHandler) getByID(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			slog.Error("close response body", "error", err)
+			observability.LoggerFromContext(r.Context(), slog.Default()).Error(
+				"close rsponse body",
+				"error", err,
+			)
 		}
 	}()
 
@@ -291,7 +298,10 @@ func (h *AvatarHandler) getCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			slog.Error("close response body", "error", err)
+			observability.LoggerFromContext(r.Context(), slog.Default()).Error(
+				"close rsponse body",
+				"error", err,
+			)
 		}
 	}()
 

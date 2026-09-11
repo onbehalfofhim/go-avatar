@@ -9,6 +9,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 )
 
 type Config struct {
@@ -44,6 +45,8 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load aws config: %w", err)
 	}
+
+	otelaws.AppendMiddlewares(&awsCfg.APIOptions)
 
 	client := s3.NewFromConfig(awsCfg, func(options *s3.Options) {
 		options.BaseEndpoint = aws.String(endpoint)

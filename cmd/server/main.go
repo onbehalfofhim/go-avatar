@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io/fs"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,24 +11,38 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"log/slog"
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
 	"go-avatar-service/internal/health"
 	httpHandler "go-avatar-service/internal/http"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/service"
 	"go-avatar-service/internal/storage/postgres"
 	"go-avatar-service/internal/storage/s3"
 	"go-avatar-service/web"
 )
 
-const shutdownTimeout = 10 * time.Second
+const (
+	shutdownTimeout           = 10 * time.Second
+	metricsCollectionInterval = 10 * time.Second
+)
 
 func main() {
-	cfg, err := config.Load()
+	cfg, err := config.LoadForService("gophprofile-server")
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config", "error", err)
+		os.Exit(1)
 	}
+
+	logger := observability.NewLogger(
+		cfg.OTelServiceName,
+		cfg.LogLevel,
+	)
 
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -38,15 +51,92 @@ func main() {
 	)
 	defer stop()
 
+	shutdownTracing, err := observability.InitTracing(
+		ctx,
+		cfg.OTelServiceName,
+		cfg.OTelExporterEndpoint,
+	)
+	if err != nil {
+		logger.Error("initialize tracing", "error", err)
+		os.Exit(1)
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			shutdownTimeout,
+		)
+		defer cancel()
+
+		if err := shutdownTracing(shutdownCtx); err != nil {
+			logger.Error("shutdown tracing", "error", err)
+		}
+	}()
+
+	metricsRegistry := prometheus.NewRegistry()
+	metrics := observability.NewMetrics(metricsRegistry)
+
+	metricsServer := &http.Server{
+		Addr: cfg.MetricsAddress(),
+		Handler: promhttp.HandlerFor(
+			metricsRegistry,
+			promhttp.HandlerOpts{},
+		),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+
+	go func() {
+		logger.Info(
+			"metrics server listening",
+			"address", cfg.MetricsAddress(),
+		)
+
+		if err := metricsServer.ListenAndServe(); err != nil &&
+			!errors.Is(err, http.ErrServerClosed) {
+			logger.Error("metrics server error", "error", err)
+			stop()
+		}
+	}()
+
 	db, err := postgres.NewPool(ctx, cfg.PostgresURL())
 	if err != nil {
-		log.Fatalf("create postgres pool: %v", err)
+		logger.Error("create postgres pool", "error", err)
+		stop()
+		return
 	}
 	defer db.Close()
 
 	if err := postgres.RunEmbeddedMigrations(cfg.PostgresURL()); err != nil {
-		log.Fatalf("run database migrations: %v", err)
+		logger.Error("run database migrations", "error", err)
+		stop()
+		return
 	}
+
+	dbMetricsCtx, stopDBMetrics := context.WithCancel(ctx)
+	defer stopDBMetrics()
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		update := func() {
+			metrics.SetDBPoolStats(db.Stat())
+		}
+
+		update()
+
+		for {
+			select {
+			case <-ticker.C:
+				update()
+			case <-dbMetricsCtx.Done():
+				return
+			}
+		}
+	}()
 
 	storage, err := s3.NewClient(
 		ctx,
@@ -58,29 +148,62 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatalf("create S3 client: %v", err)
+		logger.Error("create S3 client", "error", err)
+		stop()
+		return
 	}
 
 	if err := storage.EnsureBucket(ctx, cfg.MinIOBucket); err != nil {
-		log.Fatalf("ensure S3 bucket: %v", err)
+		logger.Error("ensure S3 bucket", "error", err)
+		stop()
+		return
 	}
 
 	broker, err := rabbitmq.NewClient(ctx, cfg.RabbitMQURL)
 	if err != nil {
-		log.Fatalf("connect to RabbitMQ: %v", err)
+		logger.Error("connect to RabbitMQ", "error", err)
+		stop()
+		return
 	}
+
 	defer func() {
 		if err := broker.Close(); err != nil {
-			log.Printf("close broker: %v", err)
+			logger.Error("close broker", "error", err)
 		}
 	}()
 
 	repository := postgres.NewAvatarRepository(db)
 
+	observability.StartStorageUsageCollector(
+		ctx,
+		metrics,
+		repository,
+		metricsCollectionInterval,
+	)
+
+	observability.StartRabbitMQQueueCollector(
+		ctx,
+		metrics,
+		broker,
+		[]string{
+			rabbitmq.ProcessingQueue,
+			rabbitmq.DeletionQueue,
+			rabbitmq.UploadRetry5sQueue,
+			rabbitmq.UploadRetry10sQueue,
+			rabbitmq.UploadRetry20sQueue,
+			rabbitmq.DeleteRetry5sQueue,
+			rabbitmq.DeleteRetry10sQueue,
+			rabbitmq.DeleteRetry20sQueue,
+			rabbitmq.DeadLetterQueue,
+		},
+		metricsCollectionInterval,
+	)
+
 	avatarService := service.NewAvatarService(
 		repository,
 		storage,
 		cfg.MinIOBucket,
+		metrics,
 	)
 
 	handler := httpHandler.NewAvatarHandler(avatarService)
@@ -88,11 +211,9 @@ func main() {
 	healthChecker := health.NewChecker()
 
 	healthChecker.Add("postgres", db.Ping)
-
 	healthChecker.Add("s3", func(ctx context.Context) error {
 		return storage.Ping(ctx, cfg.MinIOBucket)
 	})
-
 	healthChecker.Add("rabbitmq", broker.Ping)
 
 	healthHandler := httpHandler.NewHealthHandler(healthChecker)
@@ -104,16 +225,27 @@ func main() {
 
 	staticFS, err := fs.Sub(web.StaticFiles, "static")
 	if err != nil {
-		log.Fatalf("create web filesystem: %v", err)
+		logger.Error("create web filesystem", "error", err)
+		stop()
+		return
 	}
 
 	webHandler := httpHandler.NewWebHandler(staticFS)
-
 	router.Handle("/", webHandler)
 
+	metricsMiddleware := httpHandler.MetricsMiddleware(metrics)
+
+	instrumentedRouter := metricsMiddleware(router)
+
+	tracedHandler := otelhttp.NewHandler(
+		instrumentedRouter,
+		"http.server",
+	)
+
 	server := &http.Server{
-		Addr:              cfg.HTTPAddress(),
-		Handler:           router,
+		Addr:    cfg.HTTPAddress(),
+		Handler: tracedHandler,
+
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -123,7 +255,10 @@ func main() {
 	serverErrors := make(chan error, 1)
 
 	go func() {
-		log.Printf("HTTP server listening on %s", cfg.HTTPAddress())
+		logger.Info(
+			"HTTP server listening",
+			"address", cfg.HTTPAddress(),
+		)
 
 		if err := server.ListenAndServe(); err != nil &&
 			!errors.Is(err, http.ErrServerClosed) {
@@ -133,10 +268,11 @@ func main() {
 
 	select {
 	case err := <-serverErrors:
-		log.Fatalf("HTTP server error: %v", err)
+		logger.Error("HTTP server error", "error", err)
+		stop()
 
 	case <-ctx.Done():
-		log.Println("shutdown signal received")
+		logger.Info("shutdown signal received")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(
@@ -146,8 +282,12 @@ func main() {
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+		logger.Error("HTTP server shutdown error", "error", err)
 	}
 
-	log.Println("HTTP server stopped")
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		logger.Error("metrics server shutdown error", "error", err)
+	}
+
+	logger.Info("HTTP server stopped")
 }

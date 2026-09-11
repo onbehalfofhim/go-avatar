@@ -557,3 +557,44 @@ func insertOutboxEvent(
 
 	return nil
 }
+
+func (r *AvatarRepository) GetStorageUsageByUser(
+	ctx context.Context,
+) (map[string]int64, error) {
+	rows, err := r.pool.Query(
+		ctx,
+		`
+		SELECT
+			user_id,
+			COALESCE(SUM(size_bytes), 0)
+		FROM avatars
+		WHERE deleted_at IS NULL
+		GROUP BY user_id
+		`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get storage usage: %w", err)
+	}
+	defer rows.Close()
+
+	usage := make(map[string]int64)
+
+	for rows.Next() {
+		var (
+			userID string
+			bytes  int64
+		)
+
+		if err := rows.Scan(&userID, &bytes); err != nil {
+			return nil, fmt.Errorf("scan storage usage: %w", err)
+		}
+
+		usage[userID] = bytes
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate storage usage: %w", err)
+	}
+
+	return usage, nil
+}

@@ -253,6 +253,13 @@ func (c *Client) PublishJSON(
 		return fmt.Errorf("marshal rabbitmq message: %w", err)
 	}
 
+	ctx, endSpan := startPublishSpan(ctx)
+	defer endSpan()
+
+	headers := amqp.Table{}
+
+	injectTraceContext(ctx, headers)
+
 	err = c.channel.PublishWithContext(
 		ctx,
 		ExchangeName,
@@ -263,6 +270,7 @@ func (c *Client) PublishJSON(
 			ContentType:  "application/json",
 			DeliveryMode: amqp.Persistent,
 			MessageId:    messageID,
+			Headers:      headers,
 			Body:         body,
 		},
 	)
@@ -368,6 +376,17 @@ func (c *Client) PublishRetry(
 	queue string,
 	message Message,
 ) error {
+	ctx, endSpan := startPublishSpan(ctx)
+	defer endSpan()
+
+	headers := make(amqp.Table, len(message.Headers)+2)
+
+	for key, value := range message.Headers {
+		headers[key] = value
+	}
+
+	injectTraceContext(ctx, headers)
+
 	err := c.channel.PublishWithContext(
 		ctx,
 		"",
@@ -378,7 +397,7 @@ func (c *Client) PublishRetry(
 			ContentType:  message.ContentType,
 			DeliveryMode: amqp.Persistent,
 			MessageId:    message.ID,
-			Headers:      message.Headers,
+			Headers:      headers,
 			Body:         message.Body,
 		},
 	)
@@ -418,4 +437,33 @@ func DeleteRetryQueue(attempt int) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func (c *Client) QueueDepth(
+	ctx context.Context,
+	queue string,
+) (int, error) {
+	channel, err := c.connection.Channel()
+	if err != nil {
+		return 0, fmt.Errorf("open rabbitmq metrics channel: %w", err)
+	}
+	defer channel.Close()
+
+	result, err := channel.QueueDeclarePassive(
+		queue,
+		true,
+		false,
+		false,
+		false,
+		nil,
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"inspect rabbitmq queue %q: %w",
+			queue,
+			err,
+		)
+	}
+
+	return result.Messages, nil
 }

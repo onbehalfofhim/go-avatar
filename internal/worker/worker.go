@@ -6,7 +6,12 @@ import (
 	"log/slog"
 	"strconv"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
 	"go-avatar-service/internal/broker/rabbitmq"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/storage/postgres"
 )
 
@@ -60,6 +65,8 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	slog.Info("avatar worker started")
 
+	tracer := otel.Tracer("gophprofile/worker")
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -71,13 +78,42 @@ func (w *Worker) Run(ctx context.Context) error {
 				continue
 			}
 
-			if err := w.processUploadMessage(ctx, message); err != nil {
-				slog.Error(
+			messageCtx := message.Context(ctx)
+
+			messageCtx, span := tracer.Start(
+				messageCtx,
+				"worker.process.upload",
+			)
+
+			span.SetAttributes(
+				attribute.String("messaging.message.id", message.ID),
+				attribute.Int(
+					"messaging.retry_attempt",
+					retryAttempt(message),
+				),
+			)
+
+			err := w.processUploadMessage(messageCtx, message)
+
+			logger := observability.LoggerFromContext(
+				messageCtx,
+				slog.Default(),
+			)
+
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+
+				logger.Error(
 					"process upload message",
 					"message_id", message.ID,
 					"error", err,
 				)
+			} else {
+				span.SetStatus(codes.Ok, "")
 			}
+
+			span.End()
 
 		case message, ok := <-deleteMessages:
 			if !ok {
@@ -85,13 +121,42 @@ func (w *Worker) Run(ctx context.Context) error {
 				continue
 			}
 
-			if err := w.processDeleteMessage(ctx, message); err != nil {
-				slog.Error(
+			messageCtx := message.Context(ctx)
+
+			messageCtx, span := tracer.Start(
+				messageCtx,
+				"worker.process.delete",
+			)
+
+			span.SetAttributes(
+				attribute.String("messaging.message.id", message.ID),
+				attribute.Int(
+					"messaging.retry_attempt",
+					retryAttempt(message),
+				),
+			)
+
+			err := w.processDeleteMessage(messageCtx, message)
+
+			logger := observability.LoggerFromContext(
+				messageCtx,
+				slog.Default(),
+			)
+
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+
+				logger.Error(
 					"process delete message",
 					"message_id", message.ID,
 					"error", err,
 				)
+			} else {
+				span.SetStatus(codes.Ok, "")
 			}
+
+			span.End()
 		}
 
 		if uploadMessages == nil && deleteMessages == nil {
@@ -247,6 +312,7 @@ func retryAttempt(message rabbitmq.Message) int {
 		if err != nil {
 			return 0
 		}
+
 		return attempt
 	default:
 		return 0
@@ -280,6 +346,7 @@ func (w *Worker) retryOrReject(
 	if message.Headers == nil {
 		message.Headers = make(map[string]any)
 	}
+
 	message.Headers[retryAttemptHeader] = attempt + 1
 
 	if err := w.broker.PublishRetry(
@@ -344,6 +411,7 @@ func (w *Worker) retryOrRejectDelete(
 	if message.Headers == nil {
 		message.Headers = make(map[string]any)
 	}
+
 	message.Headers[retryAttemptHeader] = attempt + 1
 
 	if err := w.broker.PublishRetry(

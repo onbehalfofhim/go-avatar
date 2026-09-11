@@ -14,6 +14,8 @@ import (
 	"go-avatar-service/internal/image"
 	"go-avatar-service/internal/storage/postgres"
 	"go-avatar-service/internal/storage/s3"
+
+	"go-avatar-service/internal/observability"
 )
 
 const (
@@ -106,7 +108,13 @@ func (p *AvatarProcessor) createThumbnails(
 	}
 	defer func() {
 		if err := body.Close(); err != nil {
-			slog.Error("close S3 response body", "error", err)
+			observability.LoggerFromContext(
+				ctx,
+				slog.Default(),
+			).Error(
+				"close S3 response body",
+				"error", err,
+			)
 		}
 	}()
 
