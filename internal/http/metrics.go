@@ -39,7 +39,6 @@ func MetricsMiddleware(metrics *observability.Metrics) func(http.Handler) http.H
 			)
 
 			statusCode := strconv.Itoa(status)
-
 			metrics.HTTPRequestsTotal.WithLabelValues(
 				r.Method,
 				route,

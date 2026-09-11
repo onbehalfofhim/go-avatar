@@ -168,18 +168,6 @@ func (s *AvatarService) Upload(
 		IsActive:         true,
 	}
 
-	if err := s.repository.Create(ctx, avatar); err != nil {
-		err = fmt.Errorf(
-			"create avatar: %w",
-			err,
-		)
-
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-
-		return domain.Avatar{}, err
-	}
-
 	messageID := uuid.NewString()
 
 	event := events.AvatarUploadEvent{

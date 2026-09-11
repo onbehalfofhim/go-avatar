@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,7 +15,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"log/slog"
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
@@ -43,6 +43,7 @@ func main() {
 		cfg.OTelServiceName,
 		cfg.LogLevel,
 	)
+	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
@@ -119,7 +120,7 @@ func main() {
 	defer stopDBMetrics()
 
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(metricsCollectionInterval)
 		defer ticker.Stop()
 
 		update := func() {
@@ -219,6 +220,7 @@ func main() {
 	healthHandler := httpHandler.NewHealthHandler(healthChecker)
 
 	router := chi.NewRouter()
+	router.Use(httpHandler.MetricsMiddleware(metrics))
 
 	handler.RegisterRoutes(router)
 	router.Get("/health", healthHandler.Handle)
@@ -233,19 +235,14 @@ func main() {
 	webHandler := httpHandler.NewWebHandler(staticFS)
 	router.Handle("/", webHandler)
 
-	metricsMiddleware := httpHandler.MetricsMiddleware(metrics)
-
-	instrumentedRouter := metricsMiddleware(router)
-
 	tracedHandler := otelhttp.NewHandler(
-		instrumentedRouter,
+		router,
 		"http.server",
 	)
 
 	server := &http.Server{
-		Addr:    cfg.HTTPAddress(),
-		Handler: tracedHandler,
-
+		Addr:              cfg.HTTPAddress(),
+		Handler:           tracedHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
