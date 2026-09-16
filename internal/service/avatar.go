@@ -10,10 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-
 	"go-avatar-service/internal/broker/events"
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/domain"
@@ -21,6 +17,9 @@ import (
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/storage/postgres"
 	"go-avatar-service/internal/storage/s3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type UploadInput struct {
@@ -97,6 +96,7 @@ func (s *AvatarService) Upload(
 
 	span.SetAttributes(
 		attribute.String("avatar.user_id", input.UserID),
+		attribute.String("avatar.file_name", input.FileName),
 		attribute.Int("avatar.input_size_bytes", len(input.Content)),
 	)
 
@@ -244,30 +244,58 @@ func (s *AvatarService) GetByID(
 	ctx context.Context,
 	id string,
 ) (domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.get")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.id", id),
+	)
+
 	avatar, err := s.repository.GetByID(ctx, id)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"get avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if avatar.DeletedAt != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: %q",
 			ErrNotFound,
 			id,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", avatar.UserID),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }
@@ -276,29 +304,57 @@ func (s *AvatarService) GetCurrentByUserID(
 	ctx context.Context,
 	userID string,
 ) (domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.get_current")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", userID),
+	)
+
 	if strings.TrimSpace(userID) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatar, err := s.repository.GetCurrentByUserID(ctx, userID)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: current avatar for user %q",
 				ErrNotFound,
 				userID,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"get current avatar for user %q: %w",
 			userID,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
+
+	span.SetAttributes(
+		attribute.String("avatar.id", avatar.ID),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }
@@ -307,21 +363,44 @@ func (s *AvatarService) ListByUserID(
 	ctx context.Context,
 	userID string,
 ) ([]domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.list")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", userID),
+	)
+
 	if strings.TrimSpace(userID) == "" {
-		return nil, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
 	}
 
 	avatars, err := s.repository.ListByUserID(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf(
+		err = fmt.Errorf(
 			"list avatars for user %q: %w",
 			userID,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
 	}
+
+	span.SetAttributes(
+		attribute.Int("avatar.count", len(avatars)),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	return avatars, nil
 }
@@ -331,68 +410,117 @@ func (s *AvatarService) Delete(
 	id string,
 	userID string,
 ) (domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.delete")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.id", id),
+		attribute.String("avatar.user_id", userID),
+	)
+
 	if strings.TrimSpace(id) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: avatar ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if strings.TrimSpace(userID) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatar, err := s.repository.GetByID(ctx, id)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"get avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if avatar.DeletedAt != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: %q",
 			ErrNotFound,
 			id,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if avatar.UserID != userID {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: avatar %q belongs to another user",
 			ErrForbidden,
 			id,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatar, err = s.repository.Delete(ctx, id, userID)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"delete avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	s3Keys := make([]string, 0, 3)
@@ -414,10 +542,15 @@ func (s *AvatarService) Delete(
 
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"marshal avatar delete event: %w",
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	outboxEvent := domain.OutboxEvent{
@@ -434,19 +567,31 @@ func (s *AvatarService) Delete(
 	)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"delete avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
+
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }

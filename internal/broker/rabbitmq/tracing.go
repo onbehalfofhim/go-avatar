@@ -5,6 +5,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type headerCarrier struct {
@@ -69,6 +70,7 @@ func startPublishSpan(
 	ctx, span := tracer.Start(
 		ctx,
 		"rabbitmq.publish",
+		trace.WithSpanKind(trace.SpanKindProducer),
 	)
 
 	return ctx, func() {

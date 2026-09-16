@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/observability"
@@ -83,6 +84,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			messageCtx, span := tracer.Start(
 				messageCtx,
 				"worker.process.upload",
+				trace.WithSpanKind(trace.SpanKindConsumer),
 			)
 
 			span.SetAttributes(
@@ -126,6 +128,7 @@ func (w *Worker) Run(ctx context.Context) error {
 			messageCtx, span := tracer.Start(
 				messageCtx,
 				"worker.process.delete",
+				trace.WithSpanKind(trace.SpanKindConsumer),
 			)
 
 			span.SetAttributes(
@@ -325,7 +328,6 @@ func (w *Worker) retryOrReject(
 	processingErr error,
 ) error {
 	attempt := retryAttempt(message)
-
 	retryQueue, ok := rabbitmq.UploadRetryQueue(attempt + 1)
 	if !ok {
 		if err := message.Reject(false); err != nil {
