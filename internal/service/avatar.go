@@ -578,7 +578,7 @@ func (s *AvatarService) GetContent(
 ) (AvatarContent, error) {
 	if strings.TrimSpace(id) == "" {
 		return AvatarContent{}, fmt.Errorf(
-			"%w: avatar ID is empty",
+			"%w: avatar ID is required",
 			ErrInvalidInput,
 		)
 	}
@@ -588,14 +588,14 @@ func (s *AvatarService) GetContent(
 		return AvatarContent{}, err
 	}
 
-	body, contentType, objectSize, err := s.storage.GetObject(
+	body, contentType, contentLength, err := s.storage.GetObject(
 		ctx,
 		s.bucket,
 		avatar.S3Key,
 	)
 	if err != nil {
 		return AvatarContent{}, fmt.Errorf(
-			"get avatar content: %w",
+			"get avatar object %q: %w",
 			err,
 		)
 	}
@@ -603,6 +603,6 @@ func (s *AvatarService) GetContent(
 	return AvatarContent{
 		Body:        body,
 		ContentType: contentType,
-		Size:        objectSize,
+		Size:        contentLength,
 	}, nil
 }
