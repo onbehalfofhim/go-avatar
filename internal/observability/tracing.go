@@ -12,7 +12,11 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 )
 
-func InitTracing(ctx context.Context, serviceName, endpoint string) (func(context.Context) error, error) {
+func InitTracing(
+	ctx context.Context,
+	serviceName string,
+	endpoint string,
+) (func(context.Context) error, error) {
 	if serviceName == "" {
 		return nil, fmt.Errorf("service name is required")
 	}
@@ -54,4 +58,28 @@ func InitTracing(ctx context.Context, serviceName, endpoint string) (func(contex
 	)
 
 	return provider.Shutdown, nil
+}
+
+func InjectTraceParent(ctx context.Context) string {
+	carrier := propagation.MapCarrier{}
+
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
+	return carrier.Get("traceparent")
+}
+
+func ContextFromTraceParent(
+	ctx context.Context,
+	traceParent string,
+) context.Context {
+	if traceParent == "" {
+		return ctx
+	}
+
+	return otel.GetTextMapPropagator().Extract(
+		ctx,
+		propagation.MapCarrier{
+			"traceparent": traceParent,
+		},
+	)
 }

@@ -191,9 +191,10 @@ func (s *AvatarService) Upload(
 	}
 
 	outboxEvent := domain.OutboxEvent{
-		MessageID:  messageID,
-		RoutingKey: rabbitmq.UploadRoutingKey,
-		Payload:    payload,
+		MessageID:   messageID,
+		RoutingKey:  rabbitmq.UploadRoutingKey,
+		Payload:     payload,
+		TraceParent: observability.InjectTraceParent(ctx),
 	}
 
 	if err := s.repository.CreateWithOutbox(
@@ -554,9 +555,10 @@ func (s *AvatarService) Delete(
 	}
 
 	outboxEvent := domain.OutboxEvent{
-		MessageID:  messageID,
-		RoutingKey: rabbitmq.DeleteRoutingKey,
-		Payload:    payload,
+		MessageID:   messageID,
+		RoutingKey:  rabbitmq.DeleteRoutingKey,
+		Payload:     payload,
+		TraceParent: observability.InjectTraceParent(ctx),
 	}
 
 	avatar, err = s.repository.DeleteWithOutbox(

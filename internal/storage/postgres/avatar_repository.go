@@ -543,13 +543,15 @@ func insertOutboxEvent(
 		INSERT INTO outbox_events (
 			message_id,
 			routing_key,
-			payload
+			payload,
+			trace_parent
 		)
-		VALUES ($1, $2, $3)
+		VALUES ($1, $2, $3, $4)
 		`,
 		event.MessageID,
 		event.RoutingKey,
 		event.Payload,
+		event.TraceParent,
 	)
 	if err != nil {
 		return fmt.Errorf("insert outbox event: %w", err)

@@ -29,7 +29,7 @@ var (
 type AvatarService interface {
 	Upload(ctx context.Context, input service.UploadInput) (domain.Avatar, error)
 	GetByID(ctx context.Context, id string) (domain.Avatar, error)
-	GetContent(ctx context.Context, id, size string) (service.AvatarContent, error)
+	GetContent(ctx context.Context, id string, size string) (service.AvatarContent, error)
 	GetCurrentByUserID(ctx context.Context, userID string) (domain.Avatar, error)
 	ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error)
 	Delete(ctx context.Context, id, userID string) (domain.Avatar, error)
@@ -215,16 +215,23 @@ func (h *AvatarHandler) getByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	size := r.URL.Query().Get("size")
-
-	content, err := h.service.GetContent(r.Context(), id, size)
+	content, err := h.service.GetContent(
+		r.Context(),
+		id,
+		size,
+	)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
+
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			observability.LoggerFromContext(r.Context(), slog.Default()).Error(
-				"close rsponse body",
+			observability.LoggerFromContext(
+				r.Context(),
+				slog.Default(),
+			).Error(
+				"close response body",
 				"error", err,
 			)
 		}

@@ -29,7 +29,8 @@ func (r *OutboxRepository) GetPending(
 		SELECT
 			message_id,
 			routing_key,
-			payload
+			payload,
+			trace_parent
 		FROM outbox_events
 		WHERE published_at IS NULL
 		ORDER BY created_at
@@ -51,6 +52,7 @@ func (r *OutboxRepository) GetPending(
 			&event.MessageID,
 			&event.RoutingKey,
 			&event.Payload,
+			&event.TraceParent,
 		); err != nil {
 			return nil, fmt.Errorf("scan outbox event: %w", err)
 		}
