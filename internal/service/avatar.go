@@ -497,33 +497,6 @@ func (s *AvatarService) Delete(
 		return domain.Avatar{}, err
 	}
 
-	avatar, err = s.repository.Delete(ctx, id, userID)
-	if err != nil {
-		if postgres.IsNotFound(err) {
-			err = fmt.Errorf(
-				"%w: %q",
-				ErrNotFound,
-				id,
-			)
-
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-
-			return domain.Avatar{}, err
-		}
-
-		err = fmt.Errorf(
-			"delete avatar %q: %w",
-			id,
-			err,
-		)
-
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-
-		return domain.Avatar{}, err
-	}
-
 	s3Keys := make([]string, 0, 3)
 	s3Keys = append(s3Keys, avatar.S3Key)
 
@@ -601,18 +574,11 @@ func (s *AvatarService) Delete(
 func (s *AvatarService) GetContent(
 	ctx context.Context,
 	id string,
-	userID string,
+	size string,
 ) (AvatarContent, error) {
 	if strings.TrimSpace(id) == "" {
 		return AvatarContent{}, fmt.Errorf(
 			"%w: avatar ID is empty",
-			ErrInvalidInput,
-		)
-	}
-
-	if strings.TrimSpace(userID) == "" {
-		return AvatarContent{}, fmt.Errorf(
-			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
 	}
@@ -622,14 +588,7 @@ func (s *AvatarService) GetContent(
 		return AvatarContent{}, err
 	}
 
-	if avatar.UserID != userID {
-		return AvatarContent{}, fmt.Errorf(
-			"%w: avatar does not belong to user",
-			ErrForbidden,
-		)
-	}
-
-	body, contentType, size, err := s.storage.GetObject(
+	body, contentType, objectSize, err := s.storage.GetObject(
 		ctx,
 		s.bucket,
 		avatar.S3Key,
@@ -644,6 +603,6 @@ func (s *AvatarService) GetContent(
 	return AvatarContent{
 		Body:        body,
 		ContentType: contentType,
-		Size:        size,
+		Size:        objectSize,
 	}, nil
 }
