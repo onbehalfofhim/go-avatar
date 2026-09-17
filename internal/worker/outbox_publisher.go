@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-
 	"time"
 
 	"go-avatar-service/internal/domain"
+	"go-avatar-service/internal/observability"
 )
 
 const (
@@ -102,8 +102,13 @@ func (p *OutboxPublisher) publishEvent(
 		return fmt.Errorf("invalid event payload")
 	}
 
-	if err := p.broker.PublishJSON(
+	publishCtx := observability.ContextFromTraceParent(
 		ctx,
+		event.TraceParent,
+	)
+
+	if err := p.broker.PublishJSON(
+		publishCtx,
 		event.RoutingKey,
 		event.MessageID,
 		json.RawMessage(event.Payload),

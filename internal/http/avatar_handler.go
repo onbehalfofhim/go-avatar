@@ -13,6 +13,7 @@ import (
 
 	"go-avatar-service/internal/domain"
 	"go-avatar-service/internal/image"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/service"
 
 	"github.com/go-chi/chi/v5"
@@ -28,7 +29,7 @@ var (
 type AvatarService interface {
 	Upload(ctx context.Context, input service.UploadInput) (domain.Avatar, error)
 	GetByID(ctx context.Context, id string) (domain.Avatar, error)
-	GetContent(ctx context.Context, id, size string) (service.AvatarContent, error)
+	GetContent(ctx context.Context, id string, size string) (service.AvatarContent, error)
 	GetCurrentByUserID(ctx context.Context, userID string) (domain.Avatar, error)
 	ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error)
 	Delete(ctx context.Context, id, userID string) (domain.Avatar, error)
@@ -161,7 +162,10 @@ func (h *AvatarHandler) upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := file.Close(); err != nil {
-			slog.Error("close uploaded file", "error", err)
+			observability.LoggerFromContext(r.Context(), slog.Default()).Error(
+				"close uploaded file",
+				"error", err,
+			)
 		}
 	}()
 
@@ -211,15 +215,25 @@ func (h *AvatarHandler) getByID(w http.ResponseWriter, r *http.Request) {
 	}
 
 	size := r.URL.Query().Get("size")
-
-	content, err := h.service.GetContent(r.Context(), id, size)
+	content, err := h.service.GetContent(
+		r.Context(),
+		id,
+		size,
+	)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
+
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			slog.Error("close response body", "error", err)
+			observability.LoggerFromContext(
+				r.Context(),
+				slog.Default(),
+			).Error(
+				"close response body",
+				"error", err,
+			)
 		}
 	}()
 
@@ -291,7 +305,10 @@ func (h *AvatarHandler) getCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() {
 		if err := content.Body.Close(); err != nil {
-			slog.Error("close response body", "error", err)
+			observability.LoggerFromContext(r.Context(), slog.Default()).Error(
+				"close rsponse body",
+				"error", err,
+			)
 		}
 	}()
 

@@ -7,15 +7,19 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
-
 	"go-avatar-service/internal/broker/events"
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/domain"
 	"go-avatar-service/internal/image"
+	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/storage/postgres"
 	"go-avatar-service/internal/storage/s3"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type UploadInput struct {
@@ -33,11 +37,9 @@ type AvatarRepository interface {
 		avatar domain.Avatar,
 		event domain.OutboxEvent,
 	) error
-
 	GetByID(ctx context.Context, id string) (domain.Avatar, error)
 	GetCurrentByUserID(ctx context.Context, userID string) (domain.Avatar, error)
 	ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error)
-
 	Delete(ctx context.Context, id string, userID string) (domain.Avatar, error)
 	DeleteWithOutbox(
 		ctx context.Context,
@@ -51,6 +53,7 @@ type AvatarService struct {
 	repository AvatarRepository
 	storage    *s3.Client
 	bucket     string
+	metrics    *observability.Metrics
 }
 
 type AvatarContent struct {
@@ -63,11 +66,13 @@ func NewAvatarService(
 	repository AvatarRepository,
 	storage *s3.Client,
 	bucket string,
+	metrics *observability.Metrics,
 ) *AvatarService {
 	return &AvatarService{
 		repository: repository,
 		storage:    storage,
 		bucket:     bucket,
+		metrics:    metrics,
 	}
 }
 
@@ -75,25 +80,56 @@ func (s *AvatarService) Upload(
 	ctx context.Context,
 	input UploadInput,
 ) (domain.Avatar, error) {
+	start := time.Now()
+	status := "error"
+
+	defer func() {
+		s.metrics.UploadsTotal.WithLabelValues(status).Inc()
+		s.metrics.UploadDuration.WithLabelValues(status).Observe(
+			time.Since(start).Seconds(),
+		)
+	}()
+
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.upload")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", input.UserID),
+		attribute.String("avatar.file_name", input.FileName),
+		attribute.Int("avatar.input_size_bytes", len(input.Content)),
+	)
+
 	if strings.TrimSpace(input.UserID) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is required",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	img, info, err := image.DecodeAndValidate(input.Content)
 	if err != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"%w: validate image: %w",
 			ErrInvalidInput,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatarID := uuid.NewString()
 
 	extension := fileExtension(info.Format)
+
 	s3Key := fmt.Sprintf(
 		"avatars/%s/original.%s",
 		avatarID,
@@ -108,10 +144,15 @@ func (s *AvatarService) Upload(
 		info.ContentType,
 		int64(len(input.Content)),
 	); err != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"upload original image: %w",
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatar := domain.Avatar{
@@ -127,17 +168,9 @@ func (s *AvatarService) Upload(
 		IsActive:         true,
 	}
 
-	if err := s.repository.Create(ctx, avatar); err != nil {
-		return domain.Avatar{}, fmt.Errorf(
-			"create avatar: %w",
-			err,
-		)
-	}
-
 	messageID := uuid.NewString()
 
 	event := events.AvatarUploadEvent{
-
 		MessageID: messageID,
 		AvatarID:  avatar.ID,
 		UserID:    avatar.UserID,
@@ -145,38 +178,52 @@ func (s *AvatarService) Upload(
 	}
 
 	payload, err := json.Marshal(event)
-
 	if err != nil {
-
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"marshal avatar upload event: %w",
 			err,
 		)
 
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	outboxEvent := domain.OutboxEvent{
-
-		MessageID:  messageID,
-		RoutingKey: rabbitmq.UploadRoutingKey,
-		Payload:    payload,
+		MessageID:   messageID,
+		RoutingKey:  rabbitmq.UploadRoutingKey,
+		Payload:     payload,
+		TraceParent: observability.InjectTraceParent(ctx),
 	}
 
 	if err := s.repository.CreateWithOutbox(
-
 		ctx,
 		avatar,
 		outboxEvent,
 	); err != nil {
-
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"create avatar: %w",
 			err,
 		)
 
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	_ = img
+
+	status = "success"
+
+	span.SetAttributes(
+		attribute.String("avatar.id", avatar.ID),
+		attribute.String("avatar.mime_type", avatar.MimeType),
+		attribute.Int64("avatar.size_bytes", avatar.SizeBytes),
+	)
+
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }
@@ -198,30 +245,58 @@ func (s *AvatarService) GetByID(
 	ctx context.Context,
 	id string,
 ) (domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.get")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.id", id),
+	)
+
 	avatar, err := s.repository.GetByID(ctx, id)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"get avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if avatar.DeletedAt != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: %q",
 			ErrNotFound,
 			id,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", avatar.UserID),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }
@@ -230,29 +305,57 @@ func (s *AvatarService) GetCurrentByUserID(
 	ctx context.Context,
 	userID string,
 ) (domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.get_current")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", userID),
+	)
+
 	if strings.TrimSpace(userID) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatar, err := s.repository.GetCurrentByUserID(ctx, userID)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: current avatar for user %q",
 				ErrNotFound,
 				userID,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"get current avatar for user %q: %w",
 			userID,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
+
+	span.SetAttributes(
+		attribute.String("avatar.id", avatar.ID),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }
@@ -261,21 +364,44 @@ func (s *AvatarService) ListByUserID(
 	ctx context.Context,
 	userID string,
 ) ([]domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.list")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.user_id", userID),
+	)
+
 	if strings.TrimSpace(userID) == "" {
-		return nil, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
 	}
 
 	avatars, err := s.repository.ListByUserID(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf(
+		err = fmt.Errorf(
 			"list avatars for user %q: %w",
 			userID,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
 	}
+
+	span.SetAttributes(
+		attribute.Int("avatar.count", len(avatars)),
+	)
+	span.SetStatus(codes.Ok, "")
 
 	return avatars, nil
 }
@@ -285,68 +411,90 @@ func (s *AvatarService) Delete(
 	id string,
 	userID string,
 ) (domain.Avatar, error) {
+	tracer := otel.Tracer("gophprofile/service")
+	ctx, span := tracer.Start(ctx, "avatar.delete")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("avatar.id", id),
+		attribute.String("avatar.user_id", userID),
+	)
+
 	if strings.TrimSpace(id) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: avatar ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if strings.TrimSpace(userID) == "" {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: user ID is empty",
 			ErrInvalidInput,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	avatar, err := s.repository.GetByID(ctx, id)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"get avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if avatar.DeletedAt != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: %q",
 			ErrNotFound,
 			id,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	if avatar.UserID != userID {
-		return domain.Avatar{}, fmt.Errorf(
+		err := fmt.Errorf(
 			"%w: avatar %q belongs to another user",
 			ErrForbidden,
 			id,
 		)
-	}
 
-	avatar, err = s.repository.Delete(ctx, id, userID)
-	if err != nil {
-		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
-				"%w: %q",
-				ErrNotFound,
-				id,
-			)
-		}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 
-		return domain.Avatar{}, fmt.Errorf(
-			"delete avatar %q: %w",
-			id,
-			err,
-		)
+		return domain.Avatar{}, err
 	}
 
 	s3Keys := make([]string, 0, 3)
@@ -368,16 +516,22 @@ func (s *AvatarService) Delete(
 
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"marshal avatar delete event: %w",
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
 
 	outboxEvent := domain.OutboxEvent{
-		MessageID:  messageID,
-		RoutingKey: rabbitmq.DeleteRoutingKey,
-		Payload:    payload,
+		MessageID:   messageID,
+		RoutingKey:  rabbitmq.DeleteRoutingKey,
+		Payload:     payload,
+		TraceParent: observability.InjectTraceParent(ctx),
 	}
 
 	avatar, err = s.repository.DeleteWithOutbox(
@@ -388,19 +542,31 @@ func (s *AvatarService) Delete(
 	)
 	if err != nil {
 		if postgres.IsNotFound(err) {
-			return domain.Avatar{}, fmt.Errorf(
+			err = fmt.Errorf(
 				"%w: %q",
 				ErrNotFound,
 				id,
 			)
+
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
+			return domain.Avatar{}, err
 		}
 
-		return domain.Avatar{}, fmt.Errorf(
+		err = fmt.Errorf(
 			"delete avatar %q: %w",
 			id,
 			err,
 		)
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return domain.Avatar{}, err
 	}
+
+	span.SetStatus(codes.Ok, "")
 
 	return avatar, nil
 }
@@ -417,32 +583,7 @@ func (s *AvatarService) GetContent(
 		)
 	}
 
-	avatar, err := s.repository.GetByID(ctx, id)
-	if err != nil {
-		if postgres.IsNotFound(err) {
-			return AvatarContent{}, fmt.Errorf(
-				"%w: %q",
-				ErrNotFound,
-				id,
-			)
-		}
-
-		return AvatarContent{}, fmt.Errorf(
-			"get avatar %q: %w",
-			id,
-			err,
-		)
-	}
-
-	if avatar.DeletedAt != nil {
-		return AvatarContent{}, fmt.Errorf(
-			"%w: %q",
-			ErrNotFound,
-			id,
-		)
-	}
-
-	key, err := avatarContentKey(avatar, size)
+	avatar, err := s.GetByID(ctx, id)
 	if err != nil {
 		return AvatarContent{}, err
 	}
@@ -450,12 +591,11 @@ func (s *AvatarService) GetContent(
 	body, contentType, contentLength, err := s.storage.GetObject(
 		ctx,
 		s.bucket,
-		key,
+		avatar.S3Key,
 	)
 	if err != nil {
 		return AvatarContent{}, fmt.Errorf(
 			"get avatar object %q: %w",
-			key,
 			err,
 		)
 	}
@@ -465,43 +605,4 @@ func (s *AvatarService) GetContent(
 		ContentType: contentType,
 		Size:        contentLength,
 	}, nil
-}
-
-func avatarContentKey(
-	avatar domain.Avatar,
-	size string,
-) (string, error) {
-	switch size {
-	case "", "original":
-		return avatar.S3Key, nil
-
-	case "100":
-		key := avatar.ThumbnailS3Keys["100x100"]
-		if key == "" {
-			return "", fmt.Errorf(
-				"%w: 100x100 thumbnail is not ready",
-				ErrNotFound,
-			)
-		}
-
-		return key, nil
-
-	case "300":
-		key := avatar.ThumbnailS3Keys["300x300"]
-		if key == "" {
-			return "", fmt.Errorf(
-				"%w: 300x300 thumbnail is not ready",
-				ErrNotFound,
-			)
-		}
-
-		return key, nil
-
-	default:
-		return "", fmt.Errorf(
-			"%w: unsupported size %q",
-			ErrInvalidInput,
-			size,
-		)
-	}
 }
