@@ -19,6 +19,7 @@ func setTestEnv(t *testing.T) {
 	t.Setenv("MINIO_ACCESS_KEY", "minio")
 	t.Setenv("MINIO_SECRET_KEY", "miniosecret")
 	t.Setenv("RABBITMQ_URL", "amqp://avatar:avatar@localhost:5672/")
+	t.Setenv("OTEL_EXPORTER_ENDPOINT", "localhost:4317")
 }
 
 func testPool(t *testing.T) *pgxpool.Pool {

@@ -16,7 +16,6 @@ import (
 	"go-avatar-service/internal/image"
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/storage/postgres"
-	"go-avatar-service/internal/storage/s3"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -49,9 +48,26 @@ type AvatarRepository interface {
 	) (domain.Avatar, error)
 }
 
+type ObjectStorage interface {
+	PutObject(
+		ctx context.Context,
+		bucket string,
+		key string,
+		body io.Reader,
+		contentType string,
+		size int64,
+	) error
+
+	GetObject(
+		ctx context.Context,
+		bucket string,
+		key string,
+	) (io.ReadCloser, string, int64, error)
+}
+
 type AvatarService struct {
 	repository AvatarRepository
-	storage    *s3.Client
+	storage    ObjectStorage
 	bucket     string
 	metrics    *observability.Metrics
 }
@@ -64,7 +80,7 @@ type AvatarContent struct {
 
 func NewAvatarService(
 	repository AvatarRepository,
-	storage *s3.Client,
+	storage ObjectStorage,
 	bucket string,
 	metrics *observability.Metrics,
 ) *AvatarService {
@@ -596,6 +612,7 @@ func (s *AvatarService) GetContent(
 	if err != nil {
 		return AvatarContent{}, fmt.Errorf(
 			"get avatar object %q: %w",
+			avatar.S3Key,
 			err,
 		)
 	}

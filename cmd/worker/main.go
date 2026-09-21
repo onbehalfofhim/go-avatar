@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,7 +29,8 @@ const (
 func main() {
 	cfg, err := config.LoadForService("gophprofile-worker")
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		slog.Error("load config", "error", err)
+		os.Exit(1)
 	}
 
 	logger := observability.NewLogger(

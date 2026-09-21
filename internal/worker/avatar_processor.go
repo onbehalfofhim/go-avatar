@@ -12,8 +12,6 @@ import (
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/domain"
 	"go-avatar-service/internal/image"
-	"go-avatar-service/internal/storage/postgres"
-	"go-avatar-service/internal/storage/s3"
 
 	"go-avatar-service/internal/observability"
 )
@@ -23,14 +21,45 @@ const (
 	thumbnail300Key = "300x300"
 )
 
+type AvatarProcessorRepository interface {
+	UpdateProcessingStatus(
+		ctx context.Context,
+		id string,
+		status domain.ProcessingStatus,
+	) error
+
+	UpdateThumbnailS3Keys(
+		ctx context.Context,
+		id string,
+		keys map[string]string,
+	) error
+}
+
+type AvatarProcessorStorage interface {
+	GetObject(
+		ctx context.Context,
+		bucket string,
+		key string,
+	) (io.ReadCloser, string, int64, error)
+
+	PutObject(
+		ctx context.Context,
+		bucket string,
+		key string,
+		body io.Reader,
+		contentType string,
+		size int64,
+	) error
+}
+
 type AvatarProcessor struct {
-	repository *postgres.AvatarRepository
-	storage    *s3.Client
+	repository AvatarProcessorRepository
+	storage    AvatarProcessorStorage
 }
 
 func NewAvatarProcessor(
-	repository *postgres.AvatarRepository,
-	storage *s3.Client,
+	repository AvatarProcessorRepository,
+	storage AvatarProcessorStorage,
 ) *AvatarProcessor {
 	return &AvatarProcessor{
 		repository: repository,

@@ -7,14 +7,21 @@ import (
 
 	"go-avatar-service/internal/broker/events"
 	"go-avatar-service/internal/broker/rabbitmq"
-	"go-avatar-service/internal/storage/s3"
 )
 
-type AvatarDeleter struct {
-	storage *s3.Client
+type AvatarDeleterStorage interface {
+	DeleteObject(
+		ctx context.Context,
+		bucket string,
+		key string,
+	) error
 }
 
-func NewAvatarDeleter(storage *s3.Client) *AvatarDeleter {
+type AvatarDeleter struct {
+	storage AvatarDeleterStorage
+}
+
+func NewAvatarDeleter(storage AvatarDeleterStorage) *AvatarDeleter {
 	return &AvatarDeleter{
 		storage: storage,
 	}

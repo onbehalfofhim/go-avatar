@@ -13,26 +13,53 @@ import (
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/observability"
-	"go-avatar-service/internal/storage/postgres"
 )
 
 const retryAttemptHeader = "x-retry-attempt"
 
+type MessageConsumer interface {
+	Consume(
+		ctx context.Context,
+		queue string,
+		consumerName string,
+	) (<-chan rabbitmq.Message, error)
+}
+
+type RetryBroker interface {
+	PublishRetry(
+		ctx context.Context,
+		queue string,
+		message rabbitmq.Message,
+	) error
+}
+
+type ProcessedMessageStore interface {
+	IsProcessed(
+		ctx context.Context,
+		messageID string,
+	) (bool, error)
+
+	MarkProcessed(
+		ctx context.Context,
+		messageID string,
+	) error
+}
+
 type Worker struct {
-	consumer          *rabbitmq.Consumer
+	consumer          MessageConsumer
 	processor         *AvatarProcessor
 	deleter           *AvatarDeleter
-	broker            *rabbitmq.Client
-	processedMessages *postgres.ProcessedMessageRepository
+	broker            RetryBroker
+	processedMessages ProcessedMessageStore
 	bucket            string
 }
 
 func NewWorker(
-	consumer *rabbitmq.Consumer,
+	consumer MessageConsumer,
 	processor *AvatarProcessor,
 	deleter *AvatarDeleter,
-	broker *rabbitmq.Client,
-	processedMessages *postgres.ProcessedMessageRepository,
+	broker RetryBroker,
+	processedMessages ProcessedMessageStore,
 	bucket string,
 ) *Worker {
 	return &Worker{

@@ -58,6 +58,11 @@ func load(serviceName string) (Config, error) {
 		return Config{}, err
 	}
 
+	otelExporterEndpoint, err := getRequiredEnv("OTEL_EXPORTER_ENDPOINT")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		HTTPPort:    getEnv("HTTP_PORT", "8080"),
 		MetricsPort: getEnv("METRICS_PORT", "9091"),
@@ -77,7 +82,7 @@ func load(serviceName string) (Config, error) {
 		RabbitMQURL: rabbitMQURL,
 
 		OTelServiceName:      getEnv("OTEL_SERVICE_NAME", serviceName),
-		OTelExporterEndpoint: getEnv("OTEL_EXPORTER_ENDPOINT", "localhost:4317"),
+		OTelExporterEndpoint: otelExporterEndpoint,
 		LogLevel:             parseLogLevel(getEnv("LOG_LEVEL", "INFO")),
 	}, nil
 }
