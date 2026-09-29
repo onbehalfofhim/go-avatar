@@ -2,11 +2,13 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 )
 
 type Config struct {
-	HTTPPort string
+	HTTPPort    string
+	MetricsPort string
 
 	PostgresHost     string
 	PostgresPort     string
@@ -21,9 +23,21 @@ type Config struct {
 	MinIOUseSSL    bool
 
 	RabbitMQURL string
+
+	OTelServiceName      string
+	OTelExporterEndpoint string
+	LogLevel             slog.Level
 }
 
 func Load() (Config, error) {
+	return load("gophprofile-server")
+}
+
+func LoadForService(serviceName string) (Config, error) {
+	return load(serviceName)
+}
+
+func load(serviceName string) (Config, error) {
 	postgresPassword, err := getRequiredEnv("POSTGRES_PASSWORD")
 	if err != nil {
 		return Config{}, err
@@ -44,24 +58,41 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	otelExporterEndpoint, err := getRequiredEnv("OTEL_EXPORTER_ENDPOINT")
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
-		HTTPPort:         getEnv("HTTP_PORT", "8080"),
+		HTTPPort:    getEnv("HTTP_PORT", "8080"),
+		MetricsPort: getEnv("METRICS_PORT", "9091"),
+
 		PostgresHost:     getEnv("POSTGRES_HOST", "localhost"),
 		PostgresPort:     getEnv("POSTGRES_PORT", "5433"),
 		PostgresUser:     getEnv("POSTGRES_USER", "avatar"),
 		PostgresPassword: postgresPassword,
 		PostgresDB:       getEnv("POSTGRES_DB", "avatar"),
-		MinIOEndpoint:    getEnv("MINIO_ENDPOINT", "localhost:9000"),
-		MinIOAccessKey:   minIOAccessKey,
-		MinIOSecretKey:   minIOSecretKey,
-		MinIOBucket:      getEnv("MINIO_BUCKET", "avatars"),
-		MinIOUseSSL:      getEnv("MINIO_USE_SSL", "false") == "true",
-		RabbitMQURL:      rabbitMQURL,
+
+		MinIOEndpoint:  getEnv("MINIO_ENDPOINT", "localhost:9000"),
+		MinIOAccessKey: minIOAccessKey,
+		MinIOSecretKey: minIOSecretKey,
+		MinIOBucket:    getEnv("MINIO_BUCKET", "avatars"),
+		MinIOUseSSL:    getEnv("MINIO_USE_SSL", "false") == "true",
+
+		RabbitMQURL: rabbitMQURL,
+
+		OTelServiceName:      getEnv("OTEL_SERVICE_NAME", serviceName),
+		OTelExporterEndpoint: otelExporterEndpoint,
+		LogLevel:             parseLogLevel(getEnv("LOG_LEVEL", "INFO")),
 	}, nil
 }
 
 func (c Config) HTTPAddress() string {
 	return fmt.Sprintf(":%s", c.HTTPPort)
+}
+
+func (c Config) MetricsAddress() string {
+	return fmt.Sprintf(":%s", c.MetricsPort)
 }
 
 func (c Config) PostgresURL() string {
@@ -91,4 +122,17 @@ func getEnv(key, fallback string) string {
 	}
 
 	return value
+}
+
+func parseLogLevel(value string) slog.Level {
+	switch value {
+	case "DEBUG":
+		return slog.LevelDebug
+	case "WARN":
+		return slog.LevelWarn
+	case "ERROR":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

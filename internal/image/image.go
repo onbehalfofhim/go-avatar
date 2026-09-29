@@ -6,6 +6,7 @@ import (
 	"fmt"
 	stdimage "image"
 	"image/jpeg"
+	_ "image/png"
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
