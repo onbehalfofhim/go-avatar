@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "avatar-service.fullname" . }}-config
+  labels:
+    {{- include "avatar-service.labels" . | nindent 4 }}
+data:
+  HTTP_PORT: {{ .Values.config.httpPort | quote }}
+  METRICS_PORT: {{ .Values.config.metricsPort | quote }}
+  POSTGRES_HOST: {{ .Values.config.postgresHost | quote }}
+  POSTGRES_PORT: {{ .Values.config.postgresPort | quote }}
+  POSTGRES_USER: {{ .Values.config.postgresUser | quote }}
+  POSTGRES_DB: {{ .Values.config.postgresDB | quote }}
+  MINIO_ENDPOINT: {{ .Values.config.minioEndpoint | quote }}
+  MINIO_BUCKET: {{ .Values.config.minioBucket | quote }}
+  MINIO_USE_SSL: {{ .Values.config.minioUseSSL | quote }}
+  OTEL_EXPORTER_ENDPOINT: {{ .Values.config.otelExporterEndpoint | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  RUN_MIGRATIONS: {{ .Values.config.runMigrations | quote }}

@@ -1,17 +1,19 @@
-# Binaries for programs and plugins
+# Binaries
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
-# Test binary, build with `go test -c`
+# Test binaries
 *.test
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Coverage
 *.out
+coverage.out
+coverage.html
 
-# IDE-specific files
+# IDE
 .idea/
 .vscode/
 *.suo
@@ -20,11 +22,24 @@
 *.sln
 *.sw?
 
-# Log files
+# macOS
+.DS_Store
+
+# Logs
 *.log
 
-# Environment variables
+# Environment variables / local secrets
 .env
+.env.*
+!.env.example
+
+# Local Helm overrides
+helm/avatar-service/values-rancher-desktop.yaml
+
+# Local/build artifacts
+bin/
+dist/
+tmp/
 
 # Compiled binary
 /app

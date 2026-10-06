@@ -1,0 +1,6 @@
+.DS_Store
+.git/
+.gitignore
+values-rancher-desktop.yaml
+*.swp
+*.tmp

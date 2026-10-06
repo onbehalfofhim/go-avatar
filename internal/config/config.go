@@ -27,6 +27,8 @@ type Config struct {
 	OTelServiceName      string
 	OTelExporterEndpoint string
 	LogLevel             slog.Level
+	RunMigrations        bool
+	MigrationOnly        bool
 }
 
 func Load() (Config, error) {
@@ -38,29 +40,36 @@ func LoadForService(serviceName string) (Config, error) {
 }
 
 func load(serviceName string) (Config, error) {
+	migrationOnly := getEnv("MIGRATION_ONLY", "false") == "true"
+
 	postgresPassword, err := getRequiredEnv("POSTGRES_PASSWORD")
 	if err != nil {
 		return Config{}, err
 	}
 
-	minIOAccessKey, err := getRequiredEnv("MINIO_ACCESS_KEY")
-	if err != nil {
-		return Config{}, err
+	minIOAccessKey := ""
+	minIOSecretKey := ""
+	rabbitMQURL := ""
+	if !migrationOnly {
+		minIOAccessKey, err = getRequiredEnv("MINIO_ACCESS_KEY")
+		if err != nil {
+			return Config{}, err
+		}
+
+		minIOSecretKey, err = getRequiredEnv("MINIO_SECRET_KEY")
+		if err != nil {
+			return Config{}, err
+		}
+
+		rabbitMQURL, err = getRequiredEnv("RABBITMQ_URL")
+		if err != nil {
+			return Config{}, err
+		}
 	}
 
-	minIOSecretKey, err := getRequiredEnv("MINIO_SECRET_KEY")
-	if err != nil {
-		return Config{}, err
-	}
-
-	rabbitMQURL, err := getRequiredEnv("RABBITMQ_URL")
-	if err != nil {
-		return Config{}, err
-	}
-
-	otelExporterEndpoint, err := getRequiredEnv("OTEL_EXPORTER_ENDPOINT")
-	if err != nil {
-		return Config{}, err
+	otelExporterEndpoint := getEnv("OTEL_EXPORTER_ENDPOINT", "")
+	if !migrationOnly && otelExporterEndpoint == "" {
+		return Config{}, fmt.Errorf("required environment variable %q is not set", "OTEL_EXPORTER_ENDPOINT")
 	}
 
 	return Config{
@@ -84,6 +93,8 @@ func load(serviceName string) (Config, error) {
 		OTelServiceName:      getEnv("OTEL_SERVICE_NAME", serviceName),
 		OTelExporterEndpoint: otelExporterEndpoint,
 		LogLevel:             parseLogLevel(getEnv("LOG_LEVEL", "INFO")),
+		RunMigrations:        getEnv("RUN_MIGRATIONS", "true") == "true",
+		MigrationOnly:        migrationOnly,
 	}, nil
 }
 
