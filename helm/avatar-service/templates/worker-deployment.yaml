@@ -42,6 +42,14 @@ spec:
               value: {{ .Values.config.otelServiceNameWorker | quote }}
           resources:
             {{- toYaml .Values.worker.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
           livenessProbe:
             tcpSocket:
               port: metrics

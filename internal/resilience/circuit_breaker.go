@@ -101,6 +101,8 @@ func (b *CircuitBreaker) State() string {
 			return "half-open"
 		}
 		return "open"
+	case halfOpen:
+		return "half-open"
 	default:
 		return "closed"
 	}

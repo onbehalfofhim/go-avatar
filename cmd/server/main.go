@@ -285,17 +285,23 @@ func main() {
 		healthHandler.SetReady(false)
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(
+	serverShutdownCtx, serverShutdownCancel := context.WithTimeout(
 		context.Background(),
 		shutdownTimeout,
 	)
-	defer cancel()
+	defer serverShutdownCancel()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := server.Shutdown(serverShutdownCtx); err != nil {
 		logger.Error("HTTP server shutdown error", "error", err)
 	}
 
-	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+	metricsShutdownCtx, metricsShutdownCancel := context.WithTimeout(
+		context.Background(),
+		shutdownTimeout,
+	)
+	defer metricsShutdownCancel()
+
+	if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
 		logger.Error("metrics server shutdown error", "error", err)
 	}
 
