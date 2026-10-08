@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"go-avatar-service/internal/resilience"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 )
 
@@ -19,8 +22,14 @@ type Config struct {
 	UseSSL    bool
 }
 
+const (
+	circuitBreakerFailureThreshold = 5
+	circuitBreakerOpenTimeout      = 15 * time.Second
+)
+
 type Client struct {
-	client *s3.Client
+	client  *s3.Client
+	breaker *resilience.CircuitBreaker
 }
 
 func NewClient(ctx context.Context, cfg Config) (*Client, error) {
@@ -53,8 +62,17 @@ func NewClient(ctx context.Context, cfg Config) (*Client, error) {
 		options.UsePathStyle = true
 	})
 
+	breaker, err := resilience.NewCircuitBreaker(
+		circuitBreakerFailureThreshold,
+		circuitBreakerOpenTimeout,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create s3 circuit breaker: %w", err)
+	}
+
 	return &Client{
-		client: client,
+		client:  client,
+		breaker: breaker,
 	}, nil
 }
 
@@ -104,16 +122,20 @@ func (c *Client) PutObject(
 	contentType string,
 	size int64,
 ) error {
-	_, err := c.client.PutObject(
-		ctx,
-		&s3.PutObjectInput{
-			Bucket:        aws.String(bucket),
-			Key:           aws.String(key),
-			Body:          body,
-			ContentType:   aws.String(contentType),
-			ContentLength: aws.Int64(size),
-		},
-	)
+	var err error
+	err = c.breaker.Execute(func() error {
+		_, err := c.client.PutObject(
+			ctx,
+			&s3.PutObjectInput{
+				Bucket:        aws.String(bucket),
+				Key:           aws.String(key),
+				Body:          body,
+				ContentType:   aws.String(contentType),
+				ContentLength: aws.Int64(size),
+			},
+		)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("put object %q: %w", key, err)
 	}
@@ -126,13 +148,18 @@ func (c *Client) GetObject(
 	bucket string,
 	key string,
 ) (io.ReadCloser, string, int64, error) {
-	output, err := c.client.GetObject(
-		ctx,
-		&s3.GetObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-		},
-	)
+	var output *s3.GetObjectOutput
+	err := c.breaker.Execute(func() error {
+		var err error
+		output, err = c.client.GetObject(
+			ctx,
+			&s3.GetObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			},
+		)
+		return err
+	})
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("get object %q: %w", key, err)
 	}
@@ -155,13 +182,16 @@ func (c *Client) DeleteObject(
 	bucket string,
 	key string,
 ) error {
-	_, err := c.client.DeleteObject(
-		ctx,
-		&s3.DeleteObjectInput{
-			Bucket: aws.String(bucket),
-			Key:    aws.String(key),
-		},
-	)
+	err := c.breaker.Execute(func() error {
+		_, err := c.client.DeleteObject(
+			ctx,
+			&s3.DeleteObjectInput{
+				Bucket: aws.String(bucket),
+				Key:    aws.String(key),
+			},
+		)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("delete object %q: %w", key, err)
 	}

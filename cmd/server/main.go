@@ -39,6 +39,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if cfg.MigrationOnly {
+		if err := postgres.RunEmbeddedMigrations(cfg.PostgresURL()); err != nil {
+			slog.Error("run database migrations", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	logger := observability.NewLogger(
 		cfg.OTelServiceName,
 		cfg.LogLevel,
@@ -110,10 +118,12 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := postgres.RunEmbeddedMigrations(cfg.PostgresURL()); err != nil {
-		logger.Error("run database migrations", "error", err)
-		stop()
-		return
+	if cfg.RunMigrations {
+		if err := postgres.RunEmbeddedMigrations(cfg.PostgresURL()); err != nil {
+			logger.Error("run database migrations", "error", err)
+			stop()
+			return
+		}
 	}
 
 	dbMetricsCtx, stopDBMetrics := context.WithCancel(ctx)
@@ -224,6 +234,8 @@ func main() {
 
 	handler.RegisterRoutes(router)
 	router.Get("/health", healthHandler.Handle)
+	router.Get("/health/live", healthHandler.HandleLiveness)
+	router.Get("/health/ready", healthHandler.HandleReadiness)
 
 	staticFS, err := fs.Sub(web.StaticFiles, "static")
 	if err != nil {
@@ -270,19 +282,26 @@ func main() {
 
 	case <-ctx.Done():
 		logger.Info("shutdown signal received")
+		healthHandler.SetReady(false)
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(
+	serverShutdownCtx, serverShutdownCancel := context.WithTimeout(
 		context.Background(),
 		shutdownTimeout,
 	)
-	defer cancel()
+	defer serverShutdownCancel()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	if err := server.Shutdown(serverShutdownCtx); err != nil {
 		logger.Error("HTTP server shutdown error", "error", err)
 	}
 
-	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+	metricsShutdownCtx, metricsShutdownCancel := context.WithTimeout(
+		context.Background(),
+		shutdownTimeout,
+	)
+	defer metricsShutdownCancel()
+
+	if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
 		logger.Error("metrics server shutdown error", "error", err)
 	}
 

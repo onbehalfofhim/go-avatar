@@ -1,0 +1,83 @@
+{{- if .Values.migration.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "avatar-service.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "avatar-service.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "avatar-service.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "avatar-service.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.migration.image.repository }}:{{ .Values.migration.image.tag }}"
+          imagePullPolicy: {{ .Values.migration.image.pullPolicy }}
+          command: ["/app/server"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: MIGRATION_ONLY
+              value: "true"
+            - name: RUN_MIGRATIONS
+              value: "true"
+
+            - name: POSTGRES_HOST
+              value: {{ .Values.config.postgresHost | quote }}
+            - name: POSTGRES_PORT
+              value: {{ .Values.config.postgresPort | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.config.postgresUser | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.config.postgresDB | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "avatar-service.secretName" . }}
+                  key: POSTGRES_PASSWORD
+
+            - name: RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "avatar-service.secretName" . }}
+                  key: RABBITMQ_URL
+
+            - name: MINIO_ENDPOINT
+              value: {{ .Values.config.minioEndpoint | quote }}
+            - name: MINIO_BUCKET
+              value: {{ .Values.config.minioBucket | quote }}
+            - name: MINIO_USE_SSL
+              value: {{ .Values.config.minioUseSSL | quote }}
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "avatar-service.secretName" . }}
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "avatar-service.secretName" . }}
+                  key: MINIO_SECRET_KEY
+
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.config.otelServiceNameServer | quote }}
+            - name: OTEL_EXPORTER_ENDPOINT
+              value: {{ .Values.config.otelExporterEndpoint | quote }}
+
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+{{- end }}

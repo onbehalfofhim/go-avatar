@@ -1,0 +1,282 @@
+openapi: 3.0.3
+info:
+  title: GophProfile Avatar API
+  version: 1.0.0
+  description: API for uploading, retrieving, listing and deleting user avatars.
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Readiness and dependency health
+      responses:
+        '200':
+          description: Service is ready
+        '503':
+          description: Service is not ready
+  /health/live:
+    get:
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Process is alive
+  /health/ready:
+    get:
+      summary: Readiness probe
+      responses:
+        '200':
+          description: Service is ready
+        '503':
+          description: Service is not ready
+  /api/v1/avatars:
+    post:
+      summary: Upload an avatar
+      parameters:
+        - $ref: '#/components/parameters/UserIDHeader'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Avatar accepted for asynchronous processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          description: File is larger than 10 MiB
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/avatars/{id}:
+    get:
+      summary: Get avatar content
+      parameters:
+        - $ref: '#/components/parameters/AvatarID'
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [100, 300]
+          description: Reserved for thumbnail selection.
+      responses:
+        '200':
+          description: Avatar image
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete an avatar
+      parameters:
+        - $ref: '#/components/parameters/AvatarID'
+        - $ref: '#/components/parameters/UserIDHeader'
+      responses:
+        '204':
+          description: Avatar deleted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/avatars/{id}/metadata:
+    get:
+      summary: Get avatar metadata
+      parameters:
+        - $ref: '#/components/parameters/AvatarID'
+      responses:
+        '200':
+          description: Avatar metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Avatar'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/users/{user_id}/avatar:
+    get:
+      summary: Get current user avatar
+      parameters:
+        - $ref: '#/components/parameters/UserIDPath'
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [100, 300]
+      responses:
+        '200':
+          description: Avatar image
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete current user avatar
+      parameters:
+        - $ref: '#/components/parameters/UserIDPath'
+        - $ref: '#/components/parameters/UserIDHeader'
+      responses:
+        '204':
+          description: Avatar deleted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/users/{user_id}/avatars:
+    get:
+      summary: List user avatars
+      parameters:
+        - $ref: '#/components/parameters/UserIDPath'
+      responses:
+        '200':
+          description: User avatars
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Avatar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+components:
+  parameters:
+    AvatarID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    UserIDPath:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
+    UserIDHeader:
+      name: X-User-ID
+      in: header
+      required: true
+      schema:
+        type: string
+  schemas:
+    UploadResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          example: pending
+    Avatar:
+      type: object
+      required:
+        - id
+        - user_id
+        - file_name
+        - mime_type
+        - size_bytes
+        - upload_status
+        - processing_status
+        - is_active
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        file_name:
+          type: string
+        mime_type:
+          type: string
+        size_bytes:
+          type: integer
+          format: int64
+        upload_status:
+          type: string
+          enum: [uploaded, deleted]
+        processing_status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: User is not allowed to modify the avatar
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

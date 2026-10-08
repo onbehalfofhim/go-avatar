@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	"go-avatar-service/internal/resilience"
 )
 
 const (
@@ -29,9 +32,15 @@ const (
 	DeleteRetry20sQueue = "avatars.deletion.retry.20s"
 )
 
+const (
+	circuitBreakerFailureThreshold = 5
+	circuitBreakerOpenTimeout      = 15 * time.Second
+)
+
 type Client struct {
 	connection *amqp.Connection
 	channel    *amqp.Channel
+	breaker    *resilience.CircuitBreaker
 }
 
 func NewClient(ctx context.Context, url string) (*Client, error) {
@@ -49,9 +58,20 @@ func NewClient(ctx context.Context, url string) (*Client, error) {
 		return nil, fmt.Errorf("open rabbitmq channel: %w", err)
 	}
 
+	breaker, err := resilience.NewCircuitBreaker(
+		circuitBreakerFailureThreshold,
+		circuitBreakerOpenTimeout,
+	)
+	if err != nil {
+		_ = channel.Close()
+		_ = connection.Close()
+		return nil, fmt.Errorf("create rabbitmq circuit breaker: %w", err)
+	}
+
 	client := &Client{
 		connection: connection,
 		channel:    channel,
+		breaker:    breaker,
 	}
 
 	if err := client.declareTopology(); err != nil {
@@ -260,20 +280,22 @@ func (c *Client) PublishJSON(
 
 	injectTraceContext(ctx, headers)
 
-	err = c.channel.PublishWithContext(
-		ctx,
-		ExchangeName,
-		routingKey,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			MessageId:    messageID,
-			Headers:      headers,
-			Body:         body,
-		},
-	)
+	err = c.breaker.Execute(func() error {
+		return c.channel.PublishWithContext(
+			ctx,
+			ExchangeName,
+			routingKey,
+			false,
+			false,
+			amqp.Publishing{
+				ContentType:  "application/json",
+				DeliveryMode: amqp.Persistent,
+				MessageId:    messageID,
+				Headers:      headers,
+				Body:         body,
+			},
+		)
+	})
 	if err != nil {
 		return fmt.Errorf(
 			"publish rabbitmq message with routing key %q: %w",
@@ -387,20 +409,22 @@ func (c *Client) PublishRetry(
 
 	injectTraceContext(ctx, headers)
 
-	err := c.channel.PublishWithContext(
-		ctx,
-		"",
-		queue,
-		false,
-		false,
-		amqp.Publishing{
-			ContentType:  message.ContentType,
-			DeliveryMode: amqp.Persistent,
-			MessageId:    message.ID,
-			Headers:      headers,
-			Body:         message.Body,
-		},
-	)
+	err := c.breaker.Execute(func() error {
+		return c.channel.PublishWithContext(
+			ctx,
+			"",
+			queue,
+			false,
+			false,
+			amqp.Publishing{
+				ContentType:  message.ContentType,
+				DeliveryMode: amqp.Persistent,
+				MessageId:    message.ID,
+				Headers:      headers,
+				Body:         message.Body,
+			},
+		)
+	})
 	if err != nil {
 		return fmt.Errorf(
 			"publish message %q to retry queue %q: %w",
