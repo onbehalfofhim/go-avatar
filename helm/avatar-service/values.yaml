@@ -1,0 +1,119 @@
+server:
+  image:
+    repository: avatar-service-server
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  service:
+    port: 80
+    targetPort: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+worker:
+  image:
+    repository: avatar-service-worker
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  service:
+    port: 9091
+    targetPort: 9091
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+metrics:
+  port: 9091
+
+config:
+  httpPort: "8080"
+  metricsPort: "9091"
+  postgresHost: "host.rancher-desktop.internal"
+  postgresPort: "5433"
+  postgresUser: "avatar"
+  postgresDB: "avatar"
+  minioEndpoint: "host.rancher-desktop.internal:9000"
+  minioBucket: "avatars"
+  minioUseSSL: "false"
+  otelServiceNameServer: "gophprofile-server"
+  otelServiceNameWorker: "gophprofile-worker"
+  otelExporterEndpoint: "host.rancher-desktop.internal:4317"
+  logLevel: "INFO"
+  runMigrations: "false"
+
+secrets:
+  create: true
+  existingSecret: ""
+  postgresPassword: ""
+  minioAccessKey: ""
+  minioSecretKey: ""
+  rabbitmqURL: ""
+
+ingress:
+  enabled: true
+  className: traefik
+  host: avatars.localhost
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-burst-multiplier: "2"
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilization: 70
+  memoryUtilization: 80
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+networkPolicy:
+  enabled: true
+  ingressNamespaces:
+    - ingress-nginx
+
+securityContext:
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+podSecurityContext:
+  runAsUser: 65534
+  runAsGroup: 65534
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+serviceAccount:
+  create: true
+  name: ""
+
+migration:
+  enabled: true
+  backoffLimit: 4
+  image:
+    repository: avatar-service-server
+    tag: "dev"
+    pullPolicy: IfNotPresent
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

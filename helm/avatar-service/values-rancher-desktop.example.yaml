@@ -1,0 +1,31 @@
+# Copy to values-rancher-desktop.yaml and keep the copy out of Git.
+# Start PostgreSQL, MinIO, RabbitMQ and Jaeger with docker compose first.
+
+server:
+  image:
+    repository: avatar-service-server
+    tag: dev
+
+worker:
+  image:
+    repository: avatar-service-worker
+    tag: dev
+
+migration:
+  image:
+    repository: avatar-service-server
+    tag: dev
+
+ingress:
+  className: traefik
+
+networkPolicy:
+  ingressNamespaces:
+    - kube-system
+
+secrets:
+  # Local development credentials only. Do not use in production.
+  postgresPassword: avatar
+  minioAccessKey: minio
+  minioSecretKey: miniosecret
+  rabbitmqURL: amqp://avatar:avatar@host.rancher-desktop.internal:5672/

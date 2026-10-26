@@ -93,3 +93,30 @@ func TestHealthCheckerCheck(t *testing.T) {
 	require.Equal(t, "ok", result.Checks["postgres"])
 	require.Equal(t, "storage unavailable", result.Checks["s3"])
 }
+
+func TestHealthHandlerLiveness(t *testing.T) {
+	handler := NewHealthHandler(healthCheckerStub{})
+
+	req := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+	rec := httptest.NewRecorder()
+
+	handler.HandleLiveness(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"status":"ok"}`, rec.Body.String())
+}
+
+func TestHealthHandlerReadinessReturnsDrainingAfterShutdown(t *testing.T) {
+	handler := NewHealthHandler(healthCheckerStub{
+		result: health.Result{OK: true},
+	})
+	handler.SetReady(false)
+
+	req := httptest.NewRequest(http.MethodGet, "/health/ready", nil)
+	rec := httptest.NewRecorder()
+
+	handler.HandleReadiness(rec, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.JSONEq(t, `{"status":"draining","checks":{}}`, rec.Body.String())
+}

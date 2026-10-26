@@ -1,6 +1,6 @@
-# GophProfile
+# Avatar Service
 
-GophProfile — сервис управления пользовательскими аватарами на Go.
+Avatar Service — сервис управления пользовательскими аватарами на Go.
 
 Сервис принимает изображения, сохраняет оригиналы в S3-совместимом хранилище, хранит метаданные в PostgreSQL и асинхронно создаёт thumbnails отдельным worker-процессом через RabbitMQ.
 
@@ -179,6 +179,18 @@ HTTP Server
 │
 ├── web/
 │   └── static/
+│
+├── api/
+│   └── openapi.yaml
+│
+├── docs/
+│   ├── architecture-k8s.md
+│   └── rancher-desktop.md
+│
+├── helm/
+│   └── avatar-service/
+│
+├── internal/resilience/
 │
 ├── .dockerignore
 ├── .env.example
@@ -876,7 +888,9 @@ internal/storage/postgres/migrations
 - PostgreSQL ENUM для avatar statuses;
 - индексы и ограничения.
 
-При запуске HTTP server migrations применяются автоматически.
+При запуске через Docker Compose HTTP server применяет embedded migrations автоматически.
+
+В Kubernetes автоматический запуск migrations из нескольких server replicas отключён. Helm выполняет отдельный migration Job как `pre-install` / `pre-upgrade` hook, после чего запускаются application Deployments.
 
 ## Testing
 
@@ -969,13 +983,13 @@ worker
 Собрать server:
 
 ```bash
-docker build --target server -t gophprofile-server .
+docker build --target server -t avatar-service-server:dev .
 ```
 
 Собрать worker:
 
 ```bash
-docker build --target worker --build-arg TARGET=worker -t gophprofile-worker .
+docker build --target worker --build-arg TARGET=worker -t avatar-service-worker:dev .
 ```
 
 Для локального запуска всего окружения рекомендуется:
@@ -1001,3 +1015,332 @@ Management interfaces:
 
 - MinIO Console: `http://localhost:9001`
 - RabbitMQ Management UI: `http://localhost:15672`
+
+# Kubernetes / Helm
+
+Проект подготовлен для локального Kubernetes-кластера в Rancher Desktop.
+
+В Kubernetes разворачиваются два компонента приложения:
+
+- `server` — HTTP API и web UI;
+- `worker` — асинхронная обработка RabbitMQ-сообщений.
+
+PostgreSQL, RabbitMQ, MinIO и Jaeger в локальном сценарии остаются внешними зависимостями и могут запускаться через Docker Compose. Kubernetes Pod'ы обращаются к ним через `host.rancher-desktop.internal`.
+
+## Kubernetes prerequisites
+
+Требуются:
+
+- Rancher Desktop с включённым Kubernetes;
+- `kubectl`;
+- Helm 3;
+- Metrics Server для HPA;
+- встроенный в Rancher Desktop Traefik Ingress Controller;
+- Prometheus Operator / kube-prometheus-stack для `ServiceMonitor`.
+
+Подробная инструкция находится в [`docs/rancher-desktop.md`](docs/rancher-desktop.md).
+
+## Helm Chart
+
+Chart расположен в:
+
+```text
+helm/avatar-service/
+```
+
+Основные ресурсы:
+
+- Server Deployment;
+- Worker Deployment;
+- ClusterIP Services;
+- Ingress;
+- ConfigMap;
+- Secret;
+- ServiceAccount;
+- Role / RoleBinding без разрешений Kubernetes API;
+- HPA;
+- ServiceMonitor для server и worker;
+- NetworkPolicy;
+- Helm migration Job.
+
+## Сборка локальных образов
+
+Для Rancher Desktop с containerd:
+
+```bash
+nerdctl --namespace k8s.io build --target server -t avatar-service-server:dev .
+nerdctl --namespace k8s.io build --target worker -t avatar-service-worker:dev .
+```
+
+Для Rancher Desktop с Docker/Moby:
+
+```bash
+docker build --target server -t avatar-service-server:dev .
+docker build --target worker -t avatar-service-worker:dev .
+```
+
+## Установка в Rancher Desktop
+
+Сначала запустите внешние зависимости:
+
+```bash
+docker compose up -d postgres minio rabbitmq jaeger
+```
+
+Создайте локальный values-файл:
+
+```bash
+cp helm/avatar-service/values-rancher-desktop.example.yaml \
+   helm/avatar-service/values-rancher-desktop.yaml
+```
+
+Создайте локальный values-файл. Он содержит локальные credentials и не должен коммититься в Git:
+
+```bash
+cp helm/avatar-service/values-rancher-desktop.example.yaml \
+  helm/avatar-service/values-rancher-desktop.yaml
+```
+
+Создайте namespace:
+
+```bash
+kubectl create namespace avatar --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Проверьте Chart:
+
+```bash
+helm lint helm/avatar-service
+helm template avatar-service helm/avatar-service \
+  --namespace avatar \
+  -f helm/avatar-service/values-rancher-desktop.yaml
+```
+
+Установите релиз:
+
+```bash
+helm upgrade --install avatar-service helm/avatar-service \
+  --namespace avatar \
+  -f helm/avatar-service/values-rancher-desktop.yaml \
+  --wait \
+  --timeout 5m
+```
+
+Проверка:
+
+```bash
+helm status avatar-service -n avatar
+kubectl get pods -n avatar -o wide
+kubectl get deploy -n avatar
+kubectl get svc -n avatar
+kubectl get ingress -n avatar
+kubectl get hpa -n avatar
+kubectl get servicemonitor -n avatar
+kubectl get networkpolicy -n avatar
+kubectl get jobs -n avatar
+```
+
+Успешный migration Job удаляется Helm hook'ом после выполнения, поэтому отсутствие Job после успешного deployment является ожидаемым поведением.
+
+## Health probes
+
+Для Kubernetes разделены две проверки:
+
+```text
+GET /health/live   -> liveness
+GET /health/ready  -> readiness
+GET /health        -> readiness compatibility endpoint
+```
+
+`/health/live` не зависит от PostgreSQL, RabbitMQ или MinIO и показывает, что процесс жив.
+
+`/health/ready` проверяет внешние зависимости. При получении `SIGTERM` приложение сначала переводит readiness в состояние `draining`, а затем выполняет graceful shutdown.
+
+## HPA
+
+Server HPA настроен по CPU и memory:
+
+- minimum: 2 replicas;
+- maximum: 10 replicas;
+- CPU target: 70%;
+- memory target: 80%.
+
+Для работы HPA в кластере должен быть доступен Metrics Server:
+
+```bash
+kubectl top nodes
+kubectl top pods -n gophprofile
+```
+
+## Monitoring
+
+Application metrics уже предоставляются через `/metrics` на порту `9091`.
+
+Helm создаёт `ServiceMonitor` для:
+
+- `server`;
+- `worker`.
+
+Prometheus Operator должен быть установлен в Kubernetes-кластере.
+
+## Security
+
+Kubernetes deployment использует:
+
+- отдельный ServiceAccount;
+- `automountServiceAccountToken: false`;
+- пустой Role без разрешений Kubernetes API;
+- `runAsNonRoot: true`;
+- `allowPrivilegeEscalation: false`;
+- `readOnlyRootFilesystem: true`;
+- `capabilities.drop: [ALL]`;
+- `seccompProfile: RuntimeDefault`;
+- NetworkPolicy для server и worker;
+- Secret для PostgreSQL/MinIO/RabbitMQ credentials.
+
+Docker image также уже запускается от `nobody:nobody`.
+
+## Rate limiting
+
+В chart предусмотрены NGINX-specific annotations для rate limiting и ограничения размера request body. Однако в проверенном Rancher Desktop окружении используется встроенный Traefik, поэтому NGINX annotations не применяются Traefik автоматически.
+
+Ограничение размера изображения на уровне HTTP API — `10 MiB` — продолжает действовать независимо от Ingress Controller.
+
+Перед использованием rate limiting в production необходимо настроить соответствующий Traefik Middleware либо использовать NGINX Ingress с текущими annotations. README не считает NGINX rate limiting включённым в Rancher Desktop сценарии, пока это явно не настроено на уровне Traefik.
+
+## Circuit breaker
+
+Для runtime-операций с внешними сетевыми зависимостями добавлен circuit breaker:
+
+- RabbitMQ publish operations;
+- MinIO object operations.
+
+Текущая политика:
+
+- 5 последовательных ошибок открывают circuit;
+- 15 секунд circuit остаётся открытым;
+- затем выполняется half-open пробный запрос;
+- успешный запрос возвращает circuit в closed state.
+
+## Database migrations
+
+В локальном Docker Compose server сохраняет автоматический запуск embedded migrations.
+
+В Kubernetes server запускается с:
+
+```text
+RUN_MIGRATIONS=false
+```
+
+а Helm выполняет отдельный `pre-install` / `pre-upgrade` Job в migration-only режиме.
+
+Это предотвращает одновременный запуск миграций несколькими server replicas.
+
+## Observability в Kubernetes
+
+Application metrics доступны на порту `9091` через endpoint `/metrics`.
+
+Helm создаёт отдельный `ServiceMonitor` для server и worker. Для автоматического discovery ресурсов `ServiceMonitor` в кластере должен быть установлен Prometheus Operator / kube-prometheus-stack.
+
+Проверка наличия Metrics Server:
+
+```bash
+kubectl top nodes
+kubectl top pods -n avatar
+```
+
+Проверка ServiceMonitor:
+
+```bash
+kubectl get servicemonitor -n avatar
+kubectl describe servicemonitor -n avatar
+```
+
+HPA server использует CPU и memory metrics:
+
+- minimum: 2 replicas;
+- maximum: 10 replicas;
+- CPU target: 70%;
+- memory target: 80%.
+
+## NetworkPolicy и доступ к внешним зависимостям
+
+В Kubernetes server и worker работают с NetworkPolicy. В Rancher Desktop ingress traffic от Traefik разрешён из namespace `kube-system`.
+
+Внешние зависимости в текущем локальном сценарии остаются за пределами Kubernetes:
+
+```text
+Kubernetes
+  ├── server
+  └── worker
+       │
+       ├── PostgreSQL   -> host.rancher-desktop.internal:5433
+       ├── RabbitMQ     -> host.rancher-desktop.internal:5672
+       ├── MinIO        -> host.rancher-desktop.internal:9000
+       └── Jaeger       -> host.rancher-desktop.internal:4317
+```
+
+## Kubernetes configuration and secrets
+
+Конфигурация приложения передаётся через ConfigMap. Credentials для PostgreSQL, MinIO и RabbitMQ передаются через Kubernetes Secret.
+
+Для локального Rancher Desktop используется файл:
+
+```text
+helm/avatar-service/values-rancher-desktop.yaml
+```
+
+Этот файл создаётся из `values-rancher-desktop.example.yaml` и должен оставаться локальным. Он добавлен в `.gitignore`.
+
+Для production рекомендуется использовать заранее созданный Kubernetes Secret через `secrets.existingSecret`, а не хранить credentials в values-файле.
+
+## OpenAPI
+
+Актуальная API specification находится в:
+
+```text
+api/openapi.yaml
+```
+
+## Архитектура Kubernetes
+
+Диаграмма компонентов находится в [`docs/architecture-k8s.md`](docs/architecture-k8s.md).
+
+## Проверка через Ingress
+
+В Rancher Desktop используется Traefik. Helm values для Rancher Desktop задают:
+
+```yaml
+ingress:
+  className: traefik
+  host: avatars.localhost
+```
+
+Проверить Ingress:
+
+```bash
+kubectl get ingress -n avatar
+```
+
+Smoke test:
+
+```bash
+curl -i http://avatars.localhost/health/live
+curl -i http://avatars.localhost/health/ready
+curl -s http://avatars.localhost/metrics | head -30
+```
+
+Ожидаемый ответ `/health/live`:
+
+```json
+{"status":"ok"}
+```
+
+## Проверка graceful shutdown
+
+```bash
+kubectl delete pod -n avatar -l app.kubernetes.io/component=server --wait=false
+kubectl get pods -n avatar -w
+```
+
+Приложение получает `SIGTERM`, переводит readiness в `draining`, завершает HTTP/metrics server и закрывает внешние подключения в рамках `30s terminationGracePeriodSeconds`.

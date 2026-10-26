@@ -15,6 +15,8 @@ import (
 
 	"go-avatar-service/internal/broker/rabbitmq"
 	"go-avatar-service/internal/config"
+	"go-avatar-service/internal/health"
+	httpHandler "go-avatar-service/internal/http"
 	"go-avatar-service/internal/observability"
 	"go-avatar-service/internal/storage/postgres"
 	"go-avatar-service/internal/storage/s3"
@@ -71,12 +73,26 @@ func main() {
 	metricsRegistry := prometheus.NewRegistry()
 	metrics := observability.NewMetrics(metricsRegistry)
 
-	metricsServer := &http.Server{
-		Addr: cfg.MetricsAddress(),
-		Handler: promhttp.HandlerFor(
+	healthChecker := health.NewChecker()
+	readinessHandler := httpHandler.NewHealthHandler(healthChecker)
+	readinessHandler.SetReady(false)
+
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle(
+		"/metrics",
+		promhttp.HandlerFor(
 			metricsRegistry,
 			promhttp.HandlerOpts{},
 		),
+	)
+	metricsMux.HandleFunc(
+		"/health/ready",
+		readinessHandler.HandleReadiness,
+	)
+
+	metricsServer := &http.Server{
+		Addr:              cfg.MetricsAddress(),
+		Handler:           metricsMux,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -187,6 +203,12 @@ func main() {
 		metricsCollectionInterval,
 	)
 
+	healthChecker.Add("postgres", pool.Ping)
+	healthChecker.Add("s3", func(ctx context.Context) error {
+		return s3Client.Ping(ctx, cfg.MinIOBucket)
+	})
+	healthChecker.Add("rabbitmq", brokerClient.Ping)
+
 	consumer, err := rabbitmq.NewConsumer(brokerClient)
 	if err != nil {
 		logger.Error("create rabbitmq consumer", "error", err)
@@ -226,9 +248,13 @@ func main() {
 		cfg.MinIOBucket,
 	)
 
+	readinessHandler.SetReady(true)
+
 	if err := avatarWorker.Run(ctx); err != nil {
 		logger.Error("run worker", "error", err)
 	}
+
+	readinessHandler.SetReady(false)
 
 	shutdownCtx, cancel := context.WithTimeout(
 		context.Background(),
